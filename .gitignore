@@ -1,0 +1,6 @@
+bin/
+build/
+.gradle/
+data/
+output/
+__pycache__/
