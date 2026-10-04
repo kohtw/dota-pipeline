@@ -1,4 +1,15 @@
-rootProject.name = "clarity-examples"
+plugins {
+    id("com.gradleup.nmcp.settings") version "1.6.2"
+}
 
-if (file("../clarity").exists())
-    includeBuild("../clarity")
+rootProject.name = "clarity"
+
+if (file("../clarity-protobuf").exists())
+    includeBuild("../clarity-protobuf")
+
+nmcpSettings {
+    centralPortal {
+        username = providers.gradleProperty("mavenCentralUsername").get()
+        password = providers.gradleProperty("mavenCentralPassword").get()
+    }
+}

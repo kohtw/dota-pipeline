@@ -2,8 +2,7 @@
 /*.iml
 /.gradle
 /build
+jitwatch.*
 /replays
-/flattables_*
-/baselines
 /bench-results
 .claude/

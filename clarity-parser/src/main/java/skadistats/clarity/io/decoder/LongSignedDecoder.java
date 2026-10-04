@@ -1,0 +1,32 @@
+package skadistats.clarity.io.decoder;
+
+import skadistats.clarity.io.bitstream.BitStream;
+import skadistats.clarity.state.PrimitiveType;
+
+@RegisterDecoder
+public final class LongSignedDecoder extends Decoder {
+
+    private final int nBits;
+
+    public LongSignedDecoder(int nBits) {
+        this.nBits = nBits;
+    }
+
+    public static Long decode(BitStream bs, LongSignedDecoder d) {
+        return bs.readSBitLong(d.nBits);
+    }
+
+    public static void decodeInto(BitStream bs, LongSignedDecoder d, byte[] data, int offset) {
+        PrimitiveType.LONG_VH.set(data, offset, bs.readSBitLong(d.nBits));
+    }
+
+    public static void skip(BitStream bs, LongSignedDecoder d) {
+        bs.skip(d.nBits);
+    }
+
+    @Override
+    public PrimitiveType getPrimitiveType() {
+        return PrimitiveType.Scalar.LONG;
+    }
+
+}

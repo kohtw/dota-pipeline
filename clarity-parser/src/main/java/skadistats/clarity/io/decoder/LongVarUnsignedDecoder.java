@@ -1,0 +1,26 @@
+package skadistats.clarity.io.decoder;
+
+import skadistats.clarity.io.bitstream.BitStream;
+import skadistats.clarity.state.PrimitiveType;
+
+@RegisterDecoder
+public final class LongVarUnsignedDecoder extends Decoder {
+
+    public static Long decode(BitStream bs) {
+        return bs.readVarULong();
+    }
+
+    public static void decodeInto(BitStream bs, byte[] data, int offset) {
+        PrimitiveType.LONG_VH.set(data, offset, bs.readVarULong());
+    }
+
+    public static void skip(BitStream bs) {
+        bs.skipVarULong();
+    }
+
+    @Override
+    public PrimitiveType getPrimitiveType() {
+        return PrimitiveType.Scalar.LONG;
+    }
+
+}

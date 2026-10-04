@@ -1,124 +1,93 @@
-# CLAUDE.md
+# CLAUDE.md — clarity
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Replay parser for Dota 2, CS:GO, CS2, Deadlock. Source 1 + Source 2.
 
-## Project Overview
-
-This repository contains example code for the Clarity replay parser (https://github.com/skadistats/clarity), which parses Dota 2 and CS:GO replays. The project uses Gradle with Kotlin DSL and Java 17.
-
-## Build System
-
-The project uses **Gradle** (not Maven, despite having older Maven files). Build configuration is in `build.gradle.kts`.
-
-### Common Commands
-
-Build a specific example:
-```bash
-./gradlew <exampleName>Package
-```
-
-Run an example directly without packaging:
-```bash
-./gradlew <exampleName>Run --args "path/to/replay.dem"
-```
-
-Build all:
+## Build / test
 ```bash
 ./gradlew build
+./gradlew test
+./gradlew test --tests "skadistats.clarity.TestClassName"
+./gradlew publishToMavenLocal
 ```
 
-The built uno-jars (self-contained JARs with all dependencies) are located in `build/libs/<exampleName>.jar` and can be run with:
-```bash
-java -jar build/libs/<exampleName>.jar replay.dem
+Java 21 required — exhaustive switch over sealed types needs
+source=target=21. Don't lower it.
+
+## Release
+After publishing, bump source-tree versions to the next development
+SNAPSHOT (e.g. just-released `5.0.0` → bump to `5.1.0-SNAPSHOT`, or
+`6.0.0-SNAPSHOT` if the next cycle is a new major). Bump in lockstep:
+
+- `clarity/build.gradle.kts` — own `version`
+- `clarity-examples/build.gradle.kts` + `build-logic/src/main/kotlin/
+  examples-base.gradle.kts` — own version *and* both `clarity:<v>` pins
+- `clarity-analyzer/build.gradle.kts` — own version *and* the
+  `clarity:<v>` pin
+
+The source tree should always reflect what we're working on next, not
+what was last released. Composite builds substitute by `group:name`
+and ignore the version, so local dev is unaffected by the SNAPSHOT
+coordinates.
+
+## Layout gotchas
+- `s1` / `s2` sub-packages are load-bearing: engine-specific code goes
+  under the matching `io/`, `model/`, or `processor/` subtree.
+- Wire/protobuf definitions live in the separate `clarity-protobuf`
+  artifact at `/home/spheenik/projects/clarity/clarity-protobuf`.
+  Don't edit generated proto classes here. To update against upstream
+  Valve protos, use the tool + runbook at
+  `clarity-protobuf/tools/proto-sync/` (RUNBOOK.md).
+- `replays/` → `/home/spheenik/projects/replays`.
+
+## Parsing components (orientation)
+Bottom-up:
+
+- `runner` — the driver. `SimpleRunner` / `ControllableRunner`.
+- Event system — annotation-driven wiring. `ExecutionModel` resolves
+  dependencies, instantiates processors, injects everything at startup.
+  Backed by in-repo annotation processors in the `src/processor/`
+  source set (`ProvidesIndexProcessor`, `ListenerValidationProcessor`,
+  `EventGenerationProcessor`, `DecoderAnnotationProcessor`) — they
+  index `@Provides`, validate listener signatures, and generate code
+  at compile time so runtime avoids classpath scanning.
+- `InputSourceProcessor` — sits on top. Reads the replay source and
+  routes protobuf messages to subscribers.
+
+Two-tier routing — container messages (CDemoPacket, CDemoSendTables, …)
+carry packed embedded messages:
+```
+container → @OnMessageContainer → processEmbedded() → @OnMessage(Specific)
 ```
 
-### Running Single Tests
+Subsystem processors subscribe to those messages:
+- `sendtables` / DTClasses — entity schemas (s1 send tables, s2 flattened serializers)
+- `stringtables`           — named lookup tables (instancebaseline, etc.)
+- `entities`               — entity lifecycle + state; emits OnEntity{Created,Updated,Deleted}
+- `gameevents`             — player_death, item_purchase, …; emits @OnGameEvent
+- `modifiers`              — Dota buffs/debuffs
+- `tempentities`           — temporary visual effects
 
-Gradle tasks are auto-generated per example directory in `src/main/java/skadistats/clarity/examples/`. Each example has:
-- `<exampleName>Run` - Run the example
-- `<exampleName>Package` - Build the uno-jar
+## OpenSpec
+OpenSpec changes and specs belong in the repo they describe. Changes
+that touch the parser go here (`clarity/openspec/`); changes that touch
+examples or other downstream repos go in their own `openspec/`. Don't
+let the working directory decide — move them after creation if needed.
 
-## Project Architecture
+## Related repos
+All wired together as Gradle **composite builds** (conditional on the
+sibling checkout existing) — no publish step needed during local dev.
 
-### Event-Based Processing Model
+Upstream:
+- clarity-protobuf: `/home/spheenik/projects/clarity/clarity-protobuf`
+  — wire defs. Pulled in via `includeBuild("../clarity-protobuf")` in
+  our `settings.gradle.kts`. Bumped independently; Java 21 baseline.
 
-Clarity uses an annotation-driven event system. The core workflow:
+Downstream (API changes here need a compat check against both; both
+composite-include this repo):
+- clarity-examples: `/home/spheenik/projects/clarity/clarity-examples`
+- clarity-analyzer: `/home/spheenik/projects/clarity/clarity-analyzer`
 
-1. **Create a Source** - `MappedFileSource` (fastest, requires local file) or `InputStreamSource` (works with any InputStream)
-2. **Create a Runner** - `SimpleRunner` (single pass) or `ControllableRunner` (allows seeking, runs in separate thread)
-3. **Add Processors** - POJOs with annotated methods that handle events
-4. **Run** - Call `runner.runWith(processor)`
-
-### Key Annotations
-
-**Event Listeners:**
-- `@OnMessage(MessageClass.class)` - Receive protobuf messages from replay
-- `@OnEntityCreated`, `@OnEntityUpdated`, `@OnEntityDeleted` - Entity lifecycle events
-- `@OnGameEvent` - Game events (provided by clarity's GameEvents processor)
-- Custom events can be defined (see lifestate example)
-
-**Event Providers:**
-- `@Provides({EventClass.class})` - Declares a processor can raise custom events
-- `@Initializer(EventClass.class)` - Initialize event before use
-- `@UsesEntities` - Processor needs entity system
-
-### Context Object
-
-First parameter of all event handlers. Provides:
-- `ctx.getProcessor(Class)` - Get reference to another processor in the run
-- `ctx.getTick()` - Current replay tick
-- `ctx.getEngineType()` - Source 1 or Source 2
-- `ctx.getBuildNumber()` - Server build number (Source 2 only)
-- `ctx.createEvent(EventClass, ParamTypes...)` - Create custom events
-
-### Entity System
-
-Dota 2/CS:GO replays contain networked entities (heroes, creeps, game state, etc.). Entity structure:
-- **Send tables** (Source 1) / **Serializers** (Source 2) - Define entity schemas
-- Properties accessed via `Entity.getProperty()` or field paths
-- Schema varies between game versions, stored in replay for compatibility
-
-### Creating Custom Events
-
-See `src/main/java/skadistats/clarity/examples/lifestate/SpawnsAndDeaths.java` for complete example:
-1. Create custom event annotations (`@OnEntitySpawned`, etc.)
-2. Add `@Provides` to processor class
-3. Use `@Initializer` methods to create Event objects
-4. Listen to base events (`@OnEntityCreated`, etc.)
-5. Process data and call `event.raise(params)`
-
-## Important Implementation Notes
-
-### Dependencies
-- Clarity version: 3.1.3
-- Requires `annotationProcessor("org.atteo.classindex:classindex:3.13")` for annotation processing
-- Logback for logging (configured in `src/main/resources/logback.xml`)
-
-### Logging
-Enable logging for specific packages in `src/main/resources/logback.xml`. Example:
-```xml
-<logger name="clarity.entities" level="debug" />
-```
-
-### Replay Data
-- This repo has a symlink `replays/` pointing to `/home/spheenik/projects/replays` for test data
-- Examples expect a replay file path as first argument
-- Source 2 replays: Dota 2 (modern), CS:GO 2
-- Source 1 replays: Dota 2 (old)
-
-### Quick Info Without Iteration
-For basic match info (players, picks, bans, winner), use `Clarity.infoForFile(path)` which returns `CDemoFileInfo` without iterating the replay.
-
-## Example Categories
-
-The `src/main/java/skadistats/clarity/examples/` directory contains many examples:
-- **allchat** - Parse chat messages (simple @OnMessage example)
-- **combatlog** - Combat log replication
-- **matchend** - Scoreboard at game end (uses ControllableRunner.seekToTick)
-- **lifestate** - Custom event provider for spawn/death tracking
-- **info** - Quick metadata extraction without iteration
-- **dtinspector** - Interactive send table browser (GUI)
-- **position**, **modifiers**, **particles**, **tempentities** - Various entity features
-- **seek**, **tick** - Runner control examples
-
-Each example is self-contained with a Main.java entry point.
+Perf tooling (NOT a composite build — resolves clarity via `mavenLocal()`
+for snapshot candidates; publish first with `./gradlew publishToMavenLocal`):
+- clarity-bench: `/home/spheenik/projects/clarity/clarity-bench`
+  — cross-version JMH harness; see its README for usage
