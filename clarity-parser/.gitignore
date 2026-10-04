@@ -1,8 +1,0 @@
-/.idea
-/*.iml
-/.gradle
-/build
-jitwatch.*
-/replays
-/bench-results
-.claude/
