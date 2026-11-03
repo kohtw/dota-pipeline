@@ -2,6 +2,11 @@
 #   docker build -t dota-parser parser
 #   docker compose up --build
 # UI: http://localhost:8080 (no login)
+# S3 (Garage): http://localhost:3900, region us-east-1, path-style; creds below (dev only)
+
+x-s3-creds: &s3-creds
+  S3_ACCESS_KEY: GK1a2b3c4d5e6f7a8b9c0d1e2f
+  S3_SECRET_KEY: 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0
 
 x-airflow-common: &airflow-common
   build: ./airflow
@@ -13,6 +18,8 @@ x-airflow-common: &airflow-common
     # shared across containers so api-server and scheduler trust each other's tokens
     AIRFLOW__API_AUTH__JWT_SECRET: local-dev-jwt-secret
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    <<: *s3-creds
+    S3_ENDPOINT: http://garage:3900
   volumes:
     - ./dags:/opt/airflow/dags
     - dota-data:/data
@@ -21,6 +28,8 @@ x-airflow-common: &airflow-common
       condition: service_healthy
     docker-proxy:
       condition: service_started
+    garage:
+      condition: service_healthy
 
 services:
   postgres:
@@ -45,6 +54,21 @@ services:
       POST: 1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # data lake (S3-compatible): raw/replays/{match_id}.dem, raw/parsed/{match_id}/*
+  garage:
+    build: ./garage
+    ports:
+      - "3900:3900"  # S3 API
+    environment:
+      <<: *s3-creds
+      S3_BUCKETS: raw
+    volumes:
+      - garage-data:/var/lib/garage
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 5s
+      retries: 20
 
   airflow-init:
     <<: *airflow-common
@@ -87,5 +111,6 @@ services:
 
 volumes:
   pg-data:
+  garage-data:
   dota-data:
     name: dota-data  # fixed name so the DAG's DockerOperator can mount it

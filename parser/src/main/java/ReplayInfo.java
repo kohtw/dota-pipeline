@@ -15,50 +15,92 @@ import skadistats.clarity.source.MappedFileSource;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
 import java.util.TreeMap;
 
-/** Usage: ReplayInfo <replay.dem> <out.json> -- writes basic match info as JSON, plus <out>.combatlog.txt and <out>.positions.txt. */
+/** Usage: ReplayInfo <replay.dem> <out.json> -- writes basic match info as JSON, plus <out>.combatlog.csv, <out>.positions.csv and <out>.names.csv. */
 public class ReplayInfo {
 
     public static void main(String[] args) throws Exception {
         var info = Clarity.infoForFile(args[0]);
         var dota = info.getGameInfo().getDota();
 
+        long matchId = dota.getMatchId();
+        List<String> heroes = dota.getPlayerInfoList().stream().map(p -> p.getHeroName()).toList();
+
+        // logs next to the json: <out>.json -> <out>.combatlog.csv, <out>.positions.csv, <out>.names.csv
+        String base = args[1].replaceFirst("\\.json$", "");
+        var names = new CombatLogNames(matchId);
+        var gameStart = new GameStart();
+        try (var out = Files.newBufferedWriter(Path.of(base + ".combatlog.csv"));
+             var posOut = Files.newBufferedWriter(Path.of(base + ".positions.csv"))) {
+            new SimpleRunner(new MappedFileSource(args[0]))
+                    .runWith(new CombatLogCsv(out, matchId), new PositionDump(posOut, matchId, heroes),
+                            names, gameStart);
+        }
+        names.write(Path.of(base + ".names.csv"));
+
         var players = new StringBuilder();
+        int slot = 0;
         for (var p : dota.getPlayerInfoList()) {
             if (players.length() > 0) players.append(",\n");
-            players.append("    {\"hero\": \"").append(p.getHeroName())
+            players.append("    {\"slot\": ").append(slot++).append(", \"hero\": \"").append(p.getHeroName())
                    .append("\", \"team\": ").append(p.getGameTeam()).append("}");
         }
 
         String json = "{\n"
-                + "  \"match_id\": " + dota.getMatchId() + ",\n"
+                + "  \"match_id\": " + matchId + ",\n"
                 + "  \"game_mode\": " + dota.getGameMode() + ",\n"
                 + "  \"winner\": " + dota.getGameWinner() + ",\n"
                 + "  \"end_time\": " + dota.getEndTime() + ",\n"
+                + "  \"game_start_tick\": " + gameStart.tick + ",\n"
+                + "  \"game_start_time\": " + gameStart.time + ",\n"
                 + "  \"players\": [\n" + players + "\n  ]\n"
                 + "}\n";
         Files.writeString(Path.of(args[1]), json);
-
-        // full combat log next to the json: <out>.json -> <out>.combatlog.txt
-        String logName = args[1].replaceFirst("\\.json$", "") + ".combatlog.txt";
-        String posName = args[1].replaceFirst("\\.json$", "") + ".positions.txt";
-        String namesName = args[1].replaceFirst("\\.json$", "") + ".combatlognames.txt";
-        var names = new CombatLogNames();
-        try (var out = Files.newBufferedWriter(Path.of(logName));
-             var posOut = Files.newBufferedWriter(Path.of(posName))) {
-            new SimpleRunner(new MappedFileSource(args[0]))
-                    .runWith(new CombatLogDump(out), new PositionDump(posOut), names);
-        }
-        names.write(Path.of(namesName));
     }
 
-    /** CombatLogNames string table: index -> name, as referenced by the combat log's *NameIdx fields. */
+    /**
+     * Horn (0:00 on the game clock): first tick the gamerules state is GAME_IN_PROGRESS (5).
+     * time is m_flGameStartTime, on the same clock as the combat log timestamp.
+     */
+    @UsesEntities
+    public static class GameStart {
+        private static final int GAME_IN_PROGRESS = 5;
+        Integer tick;
+        Float time;
+
+        @Insert private Context ctx;
+        @Insert private Entities entities;
+
+        @OnTickStart
+        public void onTickStart(boolean synthetic) {
+            if (synthetic || tick != null) return;
+            entities.stream().filter(e -> e.getDtClass().getDtName().equals("CDOTAGamerulesProxy")).findFirst()
+                    .ifPresent(g -> {
+                        int state = g.getProperty("m_pGameRules.m_nGameState");
+                        if (state == GAME_IN_PROGRESS) {
+                            tick = ctx.getTick();
+                            time = g.getProperty("m_pGameRules.m_flGameStartTime");
+                        }
+                    });
+        }
+    }
+
+    /** CombatLogNames string table as CSV: match_id, idx, name (idx is what the combat log's *NameIdx fields hold). */
     public static class CombatLogNames {
         private final Map<Integer, String> byIndex = new TreeMap<>();
+        private final long matchId;
+
+        CombatLogNames(long matchId) {
+            this.matchId = matchId;
+        }
 
         @OnStringTableEntry("CombatLogNames")
         public void onEntry(StringTable table, int index, String name, ByteString value) {
@@ -66,23 +108,33 @@ public class ReplayInfo {
         }
 
         void write(Path file) throws IOException {
-            var sb = new StringBuilder();
-            byIndex.forEach((i, n) -> sb.append(i).append('\t').append(n).append('\n'));
+            var sb = new StringBuilder("match_id,idx,name\n");
+            byIndex.forEach((i, n) -> sb.append(matchId).append(',').append(i).append(',')
+                    .append(CombatLogCsv.csv(n)).append('\n'));
             Files.writeString(file, sb);
         }
     }
 
-    /** One row per hero per second (30 ticks): tick, hero, world x, world y. */
+    /**
+     * Hero positions as CSV, one row per real hero (no illusions) per second (30 ticks):
+     * match_id, tick, hero, team, x, y. hero is the npc_dota_hero_* name, matching the combat log.
+     */
     @UsesEntities
     public static class PositionDump {
         private static final int SAMPLE_TICKS = 30;
+        private static final int NULL_HANDLE = 16777215;
         private final Writer out;
+        private final long matchId;
+        private final List<String> heroes; // by player slot
 
         @Insert private Context ctx;
         @Insert private Entities entities;
 
-        PositionDump(Writer out) {
+        PositionDump(Writer out, long matchId, List<String> heroes) throws IOException {
             this.out = out;
+            this.matchId = matchId;
+            this.heroes = heroes;
+            out.write("match_id,tick,hero,team,x,y\n");
         }
 
         @OnTickStart
@@ -91,28 +143,102 @@ public class ReplayInfo {
             if (synthetic || tick % SAMPLE_TICKS != 0) return;
             for (Entity e : (Iterable<Entity>) entities.stream()
                     .filter(h -> h.getDtClass().getDtName().startsWith("CDOTA_Unit_Hero_"))::iterator) {
+                // illusions replicate another hero's model; real heroes have a null handle here
+                int replicating = e.getProperty("m_hReplicatingOtherHeroModel");
+                if (replicating != NULL_HANDLE) continue;
+                int slot = (int) e.getProperty("m_iPlayerID") / 2; // player id = 2 * slot
+                String hero = slot >= 0 && slot < heroes.size() ? heroes.get(slot) : e.getDtClass().getDtName();
+                int team = e.getProperty("m_iTeamNum");
                 int cellX = e.getProperty("CBodyComponent.m_cellX");
                 int cellY = e.getProperty("CBodyComponent.m_cellY");
                 float vecX = e.getProperty("CBodyComponent.m_vecX");
                 float vecY = e.getProperty("CBodyComponent.m_vecY");
-                out.write(String.format("[tick %d] %s x=%.1f y=%.1f%n", tick, e.getDtClass().getDtName(),
+                out.write(String.format("%d,%d,%s,%d,%.1f,%.1f%n", matchId, tick, hero, team,
                         cellX * 128f + vecX - 16384f, cellY * 128f + vecY - 16384f));
             }
         }
     }
 
-    public static class CombatLogDump {
-        private final Writer out;
+    /**
+     * Every combat log entry as one CSV row: match_id, tick, core fields, value_name, then every other
+     * CombatLogEntry field alphabetically. A cell is blank when that entry's has*() is false.
+     */
+    public static class CombatLogCsv {
+        private static final List<String> CORE =
+                List.of("Type", "Timestamp", "AttackerName", "TargetName", "InflictorName", "Value");
+        private static final Map<String, Method[]> FIELDS = fields(); // field -> {has, getter}
 
-        CombatLogDump(Writer out) {
+        private final Writer out;
+        private final long matchId;
+
+        @Insert private Context ctx;
+
+        CombatLogCsv(Writer out, long matchId) throws IOException {
             this.out = out;
+            this.matchId = matchId;
+            var header = new StringJoiner(",");
+            header.add("match_id").add("tick");
+            for (String f : FIELDS.keySet()) {
+                header.add(snake(f));
+                if (f.equals("Value")) header.add("value_name");
+            }
+            out.write(header + "\n");
         }
 
         @OnCombatLogEntry
-        public void onEntry(CombatLogEntry e) throws IOException {
-            out.write(String.format("[%.2f] %s attacker=%s target=%s inflictor=%s value=%d%n",
-                    e.getTimestamp(), e.getType(), e.getAttackerName(), e.getTargetName(),
-                    e.getInflictorName(), e.getValue()));
+        public void onEntry(CombatLogEntry e) throws Exception {
+            var row = new StringJoiner(",");
+            row.add(String.valueOf(matchId)).add(String.valueOf(ctx.getTick()));
+            for (var entry : FIELDS.entrySet()) {
+                Method[] m = entry.getValue();
+                boolean has = (boolean) m[0].invoke(e);
+                row.add(has ? csv(m[1].invoke(e)) : "");
+                if (entry.getKey().equals("Value")) row.add(has ? csv(valueName(e)) : "");
+            }
+            out.write(row + "\n");
+        }
+
+        // value is an index into CombatLogNames for some types (e.g. PURCHASE); meaningless otherwise
+        private static String valueName(CombatLogEntry e) {
+            try {
+                return e.getValueName();
+            } catch (RuntimeException ex) {
+                return null;
+            }
+        }
+
+        private static Map<String, Method[]> fields() {
+            var rest = new TreeMap<String, Method[]>();
+            for (Method has : CombatLogEntry.class.getMethods()) {
+                if (!has.getName().startsWith("has") || has.getParameterCount() != 0) continue;
+                String f = has.getName().substring(3);
+                for (String prefix : List.of("get", "is")) {
+                    try {
+                        rest.put(f, new Method[]{has, CombatLogEntry.class.getMethod(prefix + f)});
+                        break;
+                    } catch (NoSuchMethodException ignored) {
+                    }
+                }
+            }
+            var ordered = new LinkedHashMap<String, Method[]>();
+            for (String f : CORE) ordered.put(f, rest.remove(f));
+            ordered.putAll(rest);
+            return ordered;
+        }
+
+        private static String snake(String camel) {
+            return camel.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase();
+        }
+
+        static String csv(Object v) {
+            if (v == null) return "";
+            String s = v instanceof List<?> l
+                    ? String.join(";", l.stream().map(String::valueOf).toList())
+                    : String.valueOf(v);
+            if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+                s = "\"" + s.replace("\"", "\"\"") + "\"";
+            }
+            return s;
         }
     }
 }
