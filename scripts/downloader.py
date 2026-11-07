@@ -149,7 +149,9 @@ def is_ranked_all_pick(match: dict) -> bool:
 
 
 def is_in_progress(match: dict) -> bool:
-    return match.get("duration", 0) == 0
+    """Duration 0. In the seq feed these are mostly bot and new-player games that never ran, so only
+    ranked All Pick ones go on the callback list."""
+    return is_ranked_all_pick(match) and match.get("duration", 0) == 0
 
 
 def is_completed_ranked_all_pick(match: dict) -> bool:
@@ -189,6 +191,10 @@ class Paced:
         self.last = self.clock()
 
 
+def utc_day() -> str:
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+
 class State:
     def __init__(self, path: Path):
         self.db = sqlite3.connect(path, timeout=30)  # both routes share this file
@@ -221,14 +227,14 @@ class State:
 
     # API call counts, per UTC day
     def count_call(self, api: str) -> int:
-        day = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        day = utc_day()
         self.db.execute("INSERT INTO api_calls VALUES (?, ?, 1) ON CONFLICT (day, api) DO UPDATE SET n = n + 1",
                         (day, api))
         self.db.commit()
         return self.calls_today(api)
 
     def calls_today(self, api: str) -> int:
-        day = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        day = utc_day()
         row = self.db.execute("SELECT n FROM api_calls WHERE day = ? AND api = ?", (day, api)).fetchone()
         return row[0] if row else 0
 
@@ -382,6 +388,8 @@ class OpenDota:
         for attempt in range(2):
             if self.remaining_day is not None and self.remaining_day <= self.reserve:
                 raise BudgetExhausted(f"OpenDota daily calls left: {self.remaining_day}")
+            if self.state and self.state.get_meta("opendota_spent_day") == utc_day():
+                raise BudgetExhausted("OpenDota free-tier calls already used up today (UTC)")
             if self.state and self.state.calls_today("opendota") >= self.daily_cap:
                 raise BudgetExhausted(f"OpenDota daily cap of {self.daily_cap} calls reached")
             self.pace.wait()
@@ -396,6 +404,9 @@ class OpenDota:
             day = r.headers.get("x-rate-limit-remaining-day")
             if day is not None:
                 self.remaining_day = int(day)
+                if self.state and self.remaining_day <= self.reserve:
+                    # later runs today skip OpenDota without spending a call to find out
+                    self.state.set_meta("opendota_spent_day", utc_day())
             if r.status_code != 429:
                 return r
             if self.remaining_day == 0 or attempt == 1:
@@ -514,7 +525,7 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
                 since_upload = 0
     except BudgetExhausted as e:
         log.info("stopping: %s", e)
-    except RuntimeError as e:  # the next hourly run resumes from the saved cursor
+    except RuntimeError as e:  # the next run resumes from the saved cursor
         log.error("stopping on error: %s", e)
     finally:
         state.set_meta("steam_interval", f"{steam.pace.min_interval:.2f}")

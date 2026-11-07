@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  macOS launchd job for one route of scripts/downloader.py (steam or replays). It runs every
-  hour while the Mac is awake; each run stops after 55 minutes, and a lock file stops overlaps.
+  macOS launchd job for one route of scripts/downloader.py (steam or replays). launchd tries to
+  start it every 10 minutes while the Mac is awake and skips the try while a run is still going, so
+  a new run starts within 10 minutes of the last one ending. Each run stops after 55 minutes.
 
   Install both routes from the repo root. Each starts a first run at once:
     mkdir -p ~/.local/share/dota-pipeline/logs
@@ -36,7 +37,7 @@
         <string>/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>600</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

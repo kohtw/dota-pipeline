@@ -286,6 +286,21 @@ def test_opendota_stops_at_daily_reserve():
     assert len(session.calls) == 1
 
 
+def test_opendota_remembers_a_spent_day_across_runs(state: rd.State):
+    session = FakeSession({("GET", rd.OPENDOTA_API): [
+        FakeResponse(json_data={"replay_url": "u"}, headers={"x-rate-limit-remaining-day": "20"})]})
+    rd.OpenDota(session, None, reserve=20, pace=no_pace(), state=state).replay_url(1)
+    with pytest.raises(rd.BudgetExhausted):
+        rd.OpenDota(session, None, reserve=20, pace=no_pace(), state=state).replay_url(1)  # fresh run
+    assert len(session.calls) == 1
+
+
+def test_take_page_ignores_unplayed_bot_games(tmp_path: Path):
+    state = rd.State(tmp_path / "state.db")
+    bot_game = match(match_id=5, duration=0, lobby_type=14, game_mode=13)
+    assert rd.take_page(state, [bot_game], now=0) == (0, 0)
+
+
 def test_opendota_hard_cap_applies_with_a_key(state: rd.State):
     # a keyed (billed) response carries no free-tier header, so only the hard cap can stop it
     session = FakeSession({("GET", rd.OPENDOTA_API): [FakeResponse(json_data={"replay_url": "u"})]})
