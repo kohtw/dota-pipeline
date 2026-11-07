@@ -55,6 +55,12 @@ class FakeSession:
     def get(self, url: str, **kwargs) -> FakeResponse:
         return self.request("GET", url, **kwargs)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
 
 def no_pace() -> rd.Paced:
     return rd.Paced(0, sleep=lambda s: None)
@@ -153,7 +159,7 @@ def test_steam_speeds_up_after_a_run_of_successes():
     steam = rd.Steam(session, "k", pace=rd.Paced(4.0, sleep=lambda s: None), sleep=lambda s: None)
     for _ in range(rd.STEAM_SPEEDUP_AFTER):
         steam.page(1)
-    assert steam.pace.min_interval == pytest.approx(3.6)
+    assert steam.pace.min_interval == pytest.approx(3.0)
 
 
 def test_seq_for_age_uses_observed_rate_and_returns_probe_page():
@@ -326,6 +332,38 @@ def test_expired_replay_is_marked_gone(state: rd.State, tmp_path: Path):
     od = rd.OpenDota(session, None, pace=no_pace())
     rd.resolve_and_download(state, od, session, tmp_path, (1, "ready", "http://replay1.valve.net/570/1_9.dem.bz2", 0))
     assert state.counts("matches")["gone"] == 1
+
+
+def test_slow_download_is_dropped_and_retried(state: rd.State, tmp_path: Path):
+    session = FakeSession({("GET", "http://replay1.valve.net"): [FakeResponse(body=ZSTD)]})
+    ticks = iter([0, rd.STALL_GRACE_S + 1])  # 64 bytes in 61 seconds
+    with pytest.raises(rd.StalledDownload):
+        rd.download_replay(session, "http://replay1.valve.net/x", tmp_path, 1, clock=lambda: next(ticks))
+    rd.record_download(state, 1, 0, rd.StalledDownload("slow"))
+    assert state.counts("matches")["ready"] == 1  # retried on a later pass
+
+
+def test_replay_run_downloads_in_parallel_and_uploads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = rd.Config("k", None, "remote:raw", tmp_path)
+    state = rd.State(cfg.db)
+    state.add_discovered([match(match_id=i) for i in (1, 2, 3)])
+    state.update(3, status="downloading", replay_url="http://replay1.valve.net/570/3_9.dem.bz2")  # left by a crash
+    session = FakeSession({
+        ("GET", rd.OPENDOTA_API): [FakeResponse(json_data={"replay_url": "http://replay1.valve.net/570/x.dem.bz2"})],
+        ("GET", "http://replay1.valve.net"): [FakeResponse(body=ZSTD)],
+    })
+    monkeypatch.setattr(rd.requests, "Session", lambda: session)
+    monkeypatch.setattr(rd.Paced, "wait", lambda self: None)
+    uploads: list[str] = []
+    monkeypatch.setattr(rd, "upload", lambda local, dest: uploads.append(dest) or True)
+
+    rd.run_replays(cfg, max_minutes=0.01, sleep=lambda s: None, workers=2)
+
+    assert state.counts("matches") == {"downloaded": 3}
+    assert sorted(p.name for p in (tmp_path / "staging" / "replays").iterdir()) == \
+        ["1.dem.zst", "2.dem.zst", "3.dem.zst"]
+    assert uploads and all(dest == "remote:raw/replays" for dest in uploads)
+    assert state.calls_today("opendota") == 2  # match 3 already had its URL
 
 
 def test_opendota_error_schedules_a_retry(state: rd.State, tmp_path: Path):

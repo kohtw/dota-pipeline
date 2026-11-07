@@ -9,7 +9,8 @@ Two routes, run as separate processes:
            completed ranked All Pick matches for the replay route. Matches still in progress
            when fetched go on a callback list and are fetched again once they have finished.
   replays  Takes queued matches at least a day old, gets each replay URL from OpenDota
-           (60 calls a minute, 3,000 a day), and downloads the replay from Valve as delivered.
+           (60 calls a minute, 3,000 a day), and downloads replays from Valve as delivered,
+           4 at a time. Downloads slower than 200 KB/s after a minute are retried later.
 
 State lives in SQLite, so both routes resume where they stopped and never repeat work.
 
@@ -43,6 +44,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -64,7 +66,7 @@ STEAM_MIN_INTERVAL_S = 1.0
 STEAM_MAX_INTERVAL_S = 60.0
 STEAM_BACKOFF_S = 15
 STEAM_MAX_RETRIES = 6
-STEAM_SPEEDUP_AFTER = 50  # successful calls before shortening the gap by 10%
+STEAM_SPEEDUP_AFTER = 10  # successful calls before shortening the gap by a quarter
 DAYS_BACK = 7  # where the Steam route starts on its first run
 HEAD_LAG_S = 3 * 3600  # near the newest matches, wait so most of them have finished
 CALLBACK_AFTER_S = 3600
@@ -81,6 +83,9 @@ OPENDOTA_RESERVE = 20  # stop with this many daily calls left
 OPENDOTA_DAILY_CAP = 3000
 OPENDOTA_USD_PER_CALL = 0.0001
 REPLAY_UPLOAD_EVERY = 20
+DOWNLOAD_WORKERS = 4  # one slow Valve download no longer blocks the rest
+MIN_DOWNLOAD_BPS = 200_000  # give up (and retry later) below this average speed...
+STALL_GRACE_S = 60  # ...once a download has run this long
 
 MIN_FREE_GB = 20
 
@@ -291,7 +296,8 @@ class State:
 class Steam:
     """Valve also rate-limits in the short term (429 after about 10 calls a second apart), so the
     pace adapts: each 429 or 5xx doubles the gap between calls and backs off, and every run of
-    successful calls shrinks the gap again, down to STEAM_MIN_INTERVAL_S."""
+    successful calls shrinks the gap again, down to STEAM_MIN_INTERVAL_S. Throttling looks like a
+    short window, so recovery is fast."""
 
     def __init__(self, session: requests.Session, key: str, state: State | None = None,
                  pace: Paced | None = None, daily_cap: int = STEAM_DAILY_CAP,
@@ -325,7 +331,7 @@ class Steam:
                 raise RuntimeError(f"Steam {endpoint}: HTTP {r.status_code}")
             self.streak += 1
             if self.streak >= STEAM_SPEEDUP_AFTER:
-                self.pace.min_interval = max(self.pace.min_interval * 0.9, STEAM_MIN_INTERVAL_S)
+                self.pace.min_interval = max(self.pace.min_interval * 0.75, STEAM_MIN_INTERVAL_S)
                 self.streak = 0
             return r
         raise BudgetExhausted(f"Steam kept refusing calls after {STEAM_MAX_RETRIES} retries; ending this run")
@@ -464,7 +470,8 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
               sleep: Callable[[float], None] = time.sleep) -> None:
     deadline = time.monotonic() + max_minutes * 60
     state = State(cfg.db)
-    interval = float(state.get_meta("steam_interval") or STEAM_START_INTERVAL_S)  # pace learned last run
+    # start at half the pace learned last run, so each run probes for a faster rate
+    interval = max(float(state.get_meta("steam_interval") or STEAM_START_INTERVAL_S) / 2, STEAM_MIN_INTERVAL_S)
     steam = Steam(requests.Session(), cfg.steam_key, state, pace=Paced(interval), sleep=sleep)
     staging = cfg.staging / "steam"
     dest = f"{cfg.drive_dest}/steam"
@@ -512,10 +519,20 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
 
 # Replay route
 
-def download_replay(session: requests.Session, url: str, dest: Path, match_id: int) -> tuple[Path, int]:
+class StalledDownload(Exception):
+    pass
+
+
+DOWNLOAD_ERRORS = (ReplayGone, StalledDownload, requests.RequestException, ValueError, OSError)
+
+
+def download_replay(session: requests.Session, url: str, dest: Path, match_id: int,
+                    clock: Callable[[], float] = time.monotonic) -> tuple[Path, int]:
+    """Streams one replay to dest. Gives up on a download that stays slower than MIN_DOWNLOAD_BPS."""
     dest.mkdir(parents=True, exist_ok=True)
     part = dest / f"{match_id}.part"
     size, head = 0, b""
+    started = clock()
     with session.get(url, stream=True, timeout=60) as r:
         if r.status_code == 404:
             raise ReplayGone(f"Valve has no replay for {match_id}")
@@ -526,85 +543,142 @@ def download_replay(session: requests.Session, url: str, dest: Path, match_id: i
                     head = chunk[:16]
                 f.write(chunk)
                 size += len(chunk)
+                elapsed = clock() - started
+                if elapsed > STALL_GRACE_S and size / elapsed < MIN_DOWNLOAD_BPS:
+                    raise StalledDownload(f"{match_id}: {size / elapsed / 1e3:.0f} KB/s after {elapsed:.0f}s")
     final = dest / f"{match_id}{replay_suffix(head)}"
     part.rename(final)
     return final, size
 
 
-def resolve_and_download(state: State, od: OpenDota, session: requests.Session, staging: Path,
-                         row: tuple[int, str, str | None, int]) -> int:
-    """Works one match forward. Returns bytes downloaded (0 if none)."""
+def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -> str | None:
+    """Gets a match's replay URL, or schedules a retry. Returns the URL when it is ready to download."""
     match_id, status, url, attempts = row
-    if status != "ready":
-        try:
-            url = od.replay_url(match_id)
-            if not url:
-                if attempts + 1 >= MAX_ATTEMPTS:
-                    state.update(match_id, status="no_replay", attempts=attempts + 1)
-                else:
-                    od.request_fetch(match_id)
-                    state.update(match_id, status="requested", attempts=attempts + 1,
-                                 next_try=time.time() + RETRY_AFTER_S)
-                return 0
-        except RuntimeError as e:
-            failed = attempts + 1 >= MAX_ATTEMPTS
-            state.update(match_id, status="failed" if failed else "requested", attempts=attempts + 1,
-                         next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
-            log.warning("resolve %s failed: %s", match_id, e)
-            return 0
-        state.update(match_id, status="ready", replay_url=url)
+    if status == "ready":
+        return url
     try:
-        path, size = download_replay(session, url, staging, match_id)
-    except ReplayGone as e:
-        state.update(match_id, status="gone", error=str(e))
-        return 0
-    except (requests.RequestException, ValueError, OSError) as e:
+        url = od.replay_url(match_id)
+        if not url:
+            if attempts + 1 >= MAX_ATTEMPTS:
+                state.update(match_id, status="no_replay", attempts=attempts + 1)
+            else:
+                od.request_fetch(match_id)
+                state.update(match_id, status="requested", attempts=attempts + 1,
+                             next_try=time.time() + RETRY_AFTER_S)
+            return None
+    except RuntimeError as e:
         failed = attempts + 1 >= MAX_ATTEMPTS
-        state.update(match_id, status="failed" if failed else "ready", attempts=attempts + 1, error=str(e)[:300])
-        log.warning("download %s failed: %s", match_id, e)
+        state.update(match_id, status="failed" if failed else "requested", attempts=attempts + 1,
+                     next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
+        log.warning("resolve %s failed: %s", match_id, e)
+        return None
+    state.update(match_id, status="ready", replay_url=url)
+    return url
+
+
+def record_download(state: State, match_id: int, attempts: int, outcome: tuple[Path, int] | Exception) -> int:
+    """Stores a download's result. Returns bytes downloaded (0 if none)."""
+    if isinstance(outcome, ReplayGone):
+        state.update(match_id, status="gone", error=str(outcome))
         return 0
+    if isinstance(outcome, Exception):
+        failed = attempts + 1 >= MAX_ATTEMPTS
+        state.update(match_id, status="failed" if failed else "ready", attempts=attempts + 1,
+                     error=str(outcome)[:300])
+        log.warning("download %s failed: %s", match_id, outcome)
+        return 0
+    path, size = outcome
     state.update(match_id, status="downloaded", file=str(path), bytes=size, error=None)
     return size
 
 
-def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] = time.sleep) -> None:
+def resolve_and_download(state: State, od: OpenDota, session: requests.Session, staging: Path,
+                         row: tuple[int, str, str | None, int]) -> int:
+    """Works one match forward in one thread. Returns bytes downloaded (0 if none)."""
+    url = resolve(state, od, row)
+    if not url:
+        return 0
+    try:
+        outcome: tuple[Path, int] | Exception = download_replay(session, url, staging, row[0])
+    except DOWNLOAD_ERRORS as e:
+        outcome = e
+    return record_download(state, row[0], row[3], outcome)
+
+
+def download_job(url: str, dest: Path, match_id: int) -> tuple[Path, int] | Exception:
+    """Runs in a worker thread: its own session, and errors returned rather than raised."""
+    with requests.Session() as session:
+        try:
+            return download_replay(session, url, dest, match_id)
+        except DOWNLOAD_ERRORS as e:
+            return e
+
+
+def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] = time.sleep,
+                workers: int = DOWNLOAD_WORKERS) -> None:
+    """Resolves URLs one at a time in this thread (OpenDota is rate-limited) and downloads in parallel.
+    Only this thread touches SQLite."""
     deadline = time.monotonic() + max_minutes * 60
     state = State(cfg.db)
-    session = requests.Session()
-    od = OpenDota(session, cfg.opendota_key, state=state, daily_cap=cfg.opendota_daily_cap)
-    log.info("replay run started; %d matches waiting", len(state.due(time.time(), 1_000_000)))
+    state.db.execute("UPDATE matches SET status = 'ready' WHERE status = 'downloading'")  # left by a crash
+    state.db.commit()
+    od = OpenDota(requests.Session(), cfg.opendota_key, state=state, daily_cap=cfg.opendota_daily_cap)
+    log.info("replay run started; %d matches waiting, %d download workers",
+             len(state.due(time.time(), 1_000_000)), workers)
     if cfg.opendota_key:
         log.info("OpenDota key set: calls are billed; cap %d a day (about US$%.2f)",
                  cfg.opendota_daily_cap, cfg.opendota_daily_cap * OPENDOTA_USD_PER_CALL)
     staging = cfg.staging / "replays"
     dest = f"{cfg.drive_dest}/replays"
     replays = total_bytes = since_upload = 0
-    try:
-        while time.monotonic() < deadline and not disk_low(cfg.home):
-            batch = state.due(time.time(), 25)
-            if not batch:  # the Steam route has not queued anything old enough yet
-                sleep(min(300, max(deadline - time.monotonic(), 0)))
-                continue
-            for row in batch:
-                if time.monotonic() >= deadline:
-                    break
-                size = resolve_and_download(state, od, session, staging, row)
-                if size:
-                    replays, total_bytes, since_upload = replays + 1, total_bytes + size, since_upload + 1
-                    log.info("replay %d: %.1f MB (%d this run, %.2f GB, %d OpenDota calls today)",
-                             row[0], size / 1e6, replays, total_bytes / 1e9, state.calls_today("opendota"))
+    inflight: dict[Future, tuple[int, int]] = {}
+
+    def collect(block: bool) -> None:
+        nonlocal replays, total_bytes, since_upload
+        if not inflight:
+            return
+        done, _ = wait(inflight, timeout=None if block else 0, return_when=FIRST_COMPLETED)
+        for future in done:
+            match_id, attempts = inflight.pop(future)
+            size = record_download(state, match_id, attempts, future.result())
+            if size:
+                replays, total_bytes, since_upload = replays + 1, total_bytes + size, since_upload + 1
+                log.info("replay %d: %.1f MB (%d this run, %.2f GB, %d OpenDota calls today)",
+                         match_id, size / 1e6, replays, total_bytes / 1e9, state.calls_today("opendota"))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        try:
+            while time.monotonic() < deadline and not disk_low(cfg.home):
+                collect(block=False)
                 if since_upload >= REPLAY_UPLOAD_EVERY:
                     if upload(staging, dest):
                         state.mark_uploaded()
                     since_upload = 0
-    except BudgetExhausted as e:
-        log.info("stopping: %s", e)
-    finally:
-        if upload(staging, dest):
-            state.mark_uploaded()
-        log.info("replays done: %d replays (%.1f GB), %d OpenDota calls (%d today, cap %d), free-tier calls left: %s",
-                 replays, total_bytes / 1e9, od.calls, state.calls_today("opendota"), cfg.opendota_daily_cap,
-                 od.remaining_day)
+                if len(inflight) >= workers * 2:  # enough queued; wait for one to finish
+                    collect(block=True)
+                    continue
+                batch = state.due(time.time(), workers * 2 - len(inflight))
+                if not batch:
+                    if inflight:
+                        collect(block=True)
+                    else:  # the Steam route has not queued anything old enough yet
+                        sleep(min(300, max(deadline - time.monotonic(), 0)))
+                    continue
+                for row in batch:
+                    url = resolve(state, od, row)
+                    if url:
+                        state.update(row[0], status="downloading")
+                        inflight[pool.submit(download_job, url, staging, row[0])] = (row[0], row[3])
+        except BudgetExhausted as e:
+            log.info("stopping: %s", e)
+        finally:
+            while inflight:  # let started downloads finish; slow ones give up on their own
+                collect(block=True)
+            if upload(staging, dest):
+                state.mark_uploaded()
+            log.info("replays done: %d replays (%.1f GB), %d OpenDota calls (%d today, cap %d), "
+                     "free-tier calls left: %s", replays, total_bytes / 1e9, od.calls,
+                     state.calls_today("opendota"), cfg.opendota_daily_cap, od.remaining_day)
 
 
 def check(cfg: Config) -> bool:
