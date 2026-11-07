@@ -572,6 +572,7 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
     state = State(cfg.db)
     session = requests.Session()
     od = OpenDota(session, cfg.opendota_key, state=state, daily_cap=cfg.opendota_daily_cap)
+    log.info("replay run started; %d matches waiting", len(state.due(time.time(), 1_000_000)))
     if cfg.opendota_key:
         log.info("OpenDota key set: calls are billed; cap %d a day (about US$%.2f)",
                  cfg.opendota_daily_cap, cfg.opendota_daily_cap * OPENDOTA_USD_PER_CALL)
@@ -590,6 +591,8 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
                 size = resolve_and_download(state, od, session, staging, row)
                 if size:
                     replays, total_bytes, since_upload = replays + 1, total_bytes + size, since_upload + 1
+                    log.info("replay %d: %.1f MB (%d this run, %.2f GB, %d OpenDota calls today)",
+                             row[0], size / 1e6, replays, total_bytes / 1e9, state.calls_today("opendota"))
                 if since_upload >= REPLAY_UPLOAD_EVERY:
                     if upload(staging, dest):
                         state.mark_uploaded()
