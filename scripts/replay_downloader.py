@@ -46,6 +46,8 @@ OPENDOTA_API = "https://api.opendota.com/api"
 
 RANKED_LOBBY = 7  # lobby_type 7 = ranked matchmaking
 ALL_PICK = 22  # game_mode 22 = All Pick; excludes Turbo (23)
+MIN_DURATION_S = 15 * 60  # drops remakes and early surrenders
+MAX_LEAVER_STATUS = 1  # 0 = stayed, 1 = disconnected but came back; 2+ = abandoned, AFK, never connected
 AGE_HOURS = 24  # start this far back: matches under an hour old had no replay salt on OpenDota
 RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
 ERROR_RETRY_S = 600
@@ -103,12 +105,16 @@ def load_config() -> Config:
     )
 
 
-def is_ranked_all_pick(match: dict) -> bool:
+def is_completed_ranked_all_pick(match: dict) -> bool:
+    """Ranked All Pick, played to a normal finish: long enough, and nobody abandoned."""
+    players = match.get("players", [])
     return (
         match.get("lobby_type") == RANKED_LOBBY
         and match.get("game_mode") == ALL_PICK
-        and match.get("duration", 0) > 0
-        and len(match.get("players", [])) == 10
+        and match.get("duration", 0) >= MIN_DURATION_S
+        and "radiant_win" in match
+        and len(players) == 10
+        and all(p.get("leaver_status", 0) <= MAX_LEAVER_STATUS for p in players)
     )
 
 
@@ -360,10 +366,12 @@ def run(cfg: Config, max_minutes: float, max_steam_pages: int, age_hours: float)
                     break
                 (cfg.staging / "steam").mkdir(parents=True, exist_ok=True)
                 (cfg.staging / "steam" / f"seq_{cursor}.json").write_bytes(raw)
-                added = state.add_discovered([m for m in matches if is_ranked_all_pick(m)])
+                wanted = [m for m in matches if is_completed_ranked_all_pick(m)]
+                ranked_ap = sum(m.get("lobby_type") == RANKED_LOBBY and m.get("game_mode") == ALL_PICK for m in matches)
+                added = state.add_discovered(wanted)
                 age_h = (time.time() - matches[0]["start_time"]) / 3600
-                log.info("Steam page seq %d (%.1f h old): %d matches, %d new ranked All Pick",
-                         cursor, age_h, len(matches), added)
+                log.info("Steam page seq %d (%.1f h old): %d matches, %d ranked All Pick, %d completed, %d new",
+                         cursor, age_h, len(matches), ranked_ap, len(wanted), added)
                 cursor = matches[-1]["match_seq_num"] + 1
                 pages += 1
                 continue

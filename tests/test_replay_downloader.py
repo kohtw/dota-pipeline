@@ -58,16 +58,27 @@ def no_pace() -> rd.Paced:
 
 def match(**overrides) -> dict:
     m = {"match_id": 1, "match_seq_num": 10, "start_time": 0, "lobby_type": 7, "game_mode": 22,
-         "duration": 1800, "players": [{}] * 10}
+         "duration": 1800, "radiant_win": True, "players": [{"leaver_status": 0}] * 10}
     return {**m, **overrides}
 
 
-def test_ranked_all_pick_filter():
-    assert rd.is_ranked_all_pick(match())
-    assert not rd.is_ranked_all_pick(match(lobby_type=0))
-    assert not rd.is_ranked_all_pick(match(game_mode=23))
-    assert not rd.is_ranked_all_pick(match(duration=0))
-    assert not rd.is_ranked_all_pick(match(players=[{}] * 9))
+def test_completed_ranked_all_pick_filter():
+    wanted = rd.is_completed_ranked_all_pick
+    assert wanted(match())
+    assert not wanted(match(lobby_type=0))
+    assert not wanted(match(game_mode=23))
+    assert not wanted(match(duration=0))
+    assert not wanted(match(duration=rd.MIN_DURATION_S - 1))
+    assert not wanted(match(players=[{"leaver_status": 0}] * 9))
+    m = match()
+    del m["radiant_win"]
+    assert not wanted(m)
+
+
+def test_leavers_rule_out_a_match_but_reconnects_do_not():
+    wanted = rd.is_completed_ranked_all_pick
+    assert wanted(match(players=[{"leaver_status": 1}] + [{"leaver_status": 0}] * 9))
+    assert not wanted(match(players=[{"leaver_status": 3}] + [{"leaver_status": 0}] * 9))
 
 
 def test_replay_suffix_from_magic_bytes():
