@@ -20,7 +20,8 @@ Drive layout (DRIVE_DEST):
 
 Config (environment, or a .env file at the repo root):
   STEAM_API_KEY      required
-  OPENDOTA_API_KEY   optional; lifts the free daily limit (paid per call)
+  OPENDOTA_API_KEY   optional; every call is then billed (about US$0.0001 each)
+  OPENDOTA_DAILY_CAP hard cap on OpenDota calls per UTC day, keyed or not (default 3000)
   DRIVE_DEST         rclone destination  (default: "Google Drive:dota-pipeline/raw")
   DOWNLOADER_HOME    state, staging, logs (default: ~/.local/share/dota-pipeline)
 
@@ -69,6 +70,10 @@ RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
 ERROR_RETRY_S = 600
 MAX_ATTEMPTS = 3
 OPENDOTA_RESERVE = 20  # stop with this many daily calls left
+# Hard cap on OpenDota calls per UTC day, keyed or not. With a key each call costs about US$0.0001,
+# so 3,000 calls is about US$0.30 a day. Raise it with OPENDOTA_DAILY_CAP in .env.
+OPENDOTA_DAILY_CAP = 3000
+OPENDOTA_USD_PER_CALL = 0.0001
 REPLAY_UPLOAD_EVERY = 20
 
 MIN_FREE_GB = 20
@@ -90,6 +95,7 @@ class Config:
     opendota_key: str | None
     drive_dest: str
     home: Path
+    opendota_daily_cap: int = OPENDOTA_DAILY_CAP
 
     @property
     def db(self) -> Path:
@@ -119,6 +125,7 @@ def load_config() -> Config:
         opendota_key=os.environ.get("OPENDOTA_API_KEY") or None,
         drive_dest=os.environ.get("DRIVE_DEST", "Google Drive:dota-pipeline/raw"),
         home=Path(os.environ.get("DOWNLOADER_HOME", Path.home() / ".local/share/dota-pipeline")),
+        opendota_daily_cap=int(os.environ.get("OPENDOTA_DAILY_CAP") or OPENDOTA_DAILY_CAP),
     )
 
 
@@ -319,9 +326,13 @@ class Steam:
 
 
 class OpenDota:
+    """Free tier without a key. With a key, every call is billed, so a hard daily cap always applies."""
+
     def __init__(self, session: requests.Session, key: str | None, reserve: int = OPENDOTA_RESERVE,
-                 pace: Paced | None = None, sleep: Callable[[float], None] = time.sleep):
+                 pace: Paced | None = None, sleep: Callable[[float], None] = time.sleep,
+                 state: State | None = None, daily_cap: int = OPENDOTA_DAILY_CAP):
         self.session, self.key, self.reserve, self.sleep = session, key, reserve, sleep
+        self.state, self.daily_cap = state, daily_cap
         self.pace = pace or Paced(1.05)  # free tier: 60 calls a minute
         self.calls = 0
         self.remaining_day: int | None = None
@@ -330,8 +341,12 @@ class OpenDota:
         for attempt in range(2):
             if self.remaining_day is not None and self.remaining_day <= self.reserve:
                 raise BudgetExhausted(f"OpenDota daily calls left: {self.remaining_day}")
+            if self.state and self.state.calls_today("opendota") >= self.daily_cap:
+                raise BudgetExhausted(f"OpenDota daily cap of {self.daily_cap} calls reached")
             self.pace.wait()
             self.calls += 1
+            if self.state:
+                self.state.count_call("opendota")
             params = {"api_key": self.key} if self.key else {}
             try:
                 r = self.session.request(method, f"{OPENDOTA_API}/{path}", params=params, timeout=30)
@@ -524,7 +539,10 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
     deadline = time.monotonic() + max_minutes * 60
     state = State(cfg.db)
     session = requests.Session()
-    od = OpenDota(session, cfg.opendota_key)
+    od = OpenDota(session, cfg.opendota_key, state=state, daily_cap=cfg.opendota_daily_cap)
+    if cfg.opendota_key:
+        log.info("OpenDota key set: calls are billed; cap %d a day (about US$%.2f)",
+                 cfg.opendota_daily_cap, cfg.opendota_daily_cap * OPENDOTA_USD_PER_CALL)
     staging = cfg.staging / "replays"
     dest = f"{cfg.drive_dest}/replays"
     replays = total_bytes = since_upload = 0
@@ -549,8 +567,9 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
     finally:
         if upload(staging, dest):
             state.mark_uploaded()
-        log.info("replays done: %d replays (%.1f GB), %d OpenDota calls, OpenDota calls left today: %s",
-                 replays, total_bytes / 1e9, od.calls, od.remaining_day)
+        log.info("replays done: %d replays (%.1f GB), %d OpenDota calls (%d today, cap %d), free-tier calls left: %s",
+                 replays, total_bytes / 1e9, od.calls, state.calls_today("opendota"), cfg.opendota_daily_cap,
+                 od.remaining_day)
 
 
 def check(cfg: Config) -> bool:
@@ -563,7 +582,11 @@ def check(cfg: Config) -> bool:
         print(("ok    " if passed else "FAIL  ") + message)
 
     report(bool(cfg.steam_key), "STEAM_API_KEY is set")
-    print(f"info  OPENDOTA_API_KEY {'is set' if cfg.opendota_key else 'not set; free tier, 3,000 calls a day'}")
+    if cfg.opendota_key:
+        print(f"WARN  OPENDOTA_API_KEY is set: calls are billed, capped at {cfg.opendota_daily_cap} a day "
+              f"(about US${cfg.opendota_daily_cap * OPENDOTA_USD_PER_CALL:.2f})")
+    else:
+        print("info  OPENDOTA_API_KEY not set; free tier, 3,000 calls a day, no charges")
     rclone = shutil.which("rclone")
     report(rclone is not None, "rclone is installed")
     if rclone:
@@ -580,6 +603,11 @@ def check(cfg: Config) -> bool:
 def status(cfg: Config) -> None:
     state = State(cfg.db)
     print(f"Steam calls today: {state.calls_today('steam')} of {STEAM_DAILY_CAP}")
+    od_today = state.calls_today("opendota")
+    cost = f", about US${od_today * OPENDOTA_USD_PER_CALL:.2f} if billed" if cfg.opendota_key else ", free tier"
+    print(f"OpenDota calls today: {od_today} of {cfg.opendota_daily_cap}{cost}")
+    od_total = state.db.execute("SELECT COALESCE(SUM(n), 0) FROM api_calls WHERE api = 'opendota'").fetchone()[0]
+    print(f"OpenDota calls in total: {od_total}")
     print(f"Steam cursor: {state.get_meta('steam_cursor') or 'not started'}")
     print("Callbacks:", state.counts("callbacks") or "none")
     print("Replay queue:")

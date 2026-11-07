@@ -231,6 +231,26 @@ def test_opendota_stops_at_daily_reserve():
     assert len(session.calls) == 1
 
 
+def test_opendota_hard_cap_applies_with_a_key(state: rd.State):
+    # a keyed (billed) response carries no free-tier header, so only the hard cap can stop it
+    session = FakeSession({("GET", rd.OPENDOTA_API): [FakeResponse(json_data={"replay_url": "u"})]})
+    od = rd.OpenDota(session, "paid-key", pace=no_pace(), state=state, daily_cap=2)
+    od.replay_url(1)
+    od.replay_url(2)
+    with pytest.raises(rd.BudgetExhausted):
+        od.replay_url(3)
+    assert len(session.calls) == 2
+    assert session.calls[0][2] == {"api_key": "paid-key"}
+
+
+def test_cap_from_env_file_is_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(rd, "ROOT", tmp_path)
+    (tmp_path / ".env").write_text("OPENDOTA_DAILY_CAP=500\n")
+    monkeypatch.delenv("OPENDOTA_DAILY_CAP", raising=False)
+    assert rd.load_config().opendota_daily_cap == 500
+    monkeypatch.delenv("OPENDOTA_DAILY_CAP", raising=False)
+
+
 def test_opendota_429_with_no_calls_left_stops():
     session = FakeSession({("GET", rd.OPENDOTA_API): [
         FakeResponse(status=429, headers={"x-rate-limit-remaining-day": "0"})]})
