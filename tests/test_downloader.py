@@ -127,6 +127,35 @@ def test_steam_stops_at_daily_cap(state: rd.State):
     assert state.calls_today("steam") == 2
 
 
+def test_steam_429_backs_off_slows_down_and_retries():
+    session = FakeSession({("GET", rd.STEAM_API): [FakeResponse(status=429), FakeResponse(status=503),
+                                                     steam_page(match())]})
+    slept: list[float] = []
+    steam = rd.Steam(session, "k", pace=rd.Paced(1.0, sleep=lambda s: None), sleep=slept.append)
+    _, matches = steam.page(1)
+    assert len(matches) == 1
+    assert slept == [rd.STEAM_BACKOFF_S, rd.STEAM_BACKOFF_S * 2]
+    assert steam.pace.min_interval == 4.0  # doubled twice
+    assert steam.throttled == 2
+
+
+def test_steam_gives_up_the_run_when_throttling_persists():
+    session = FakeSession({("GET", rd.STEAM_API): [FakeResponse(status=429)]})
+    steam = rd.Steam(session, "k", pace=no_pace(), sleep=lambda s: None)
+    with pytest.raises(rd.BudgetExhausted):
+        steam.page(1)
+    assert len(session.calls) == rd.STEAM_MAX_RETRIES + 1
+    assert steam.pace.min_interval <= rd.STEAM_MAX_INTERVAL_S
+
+
+def test_steam_speeds_up_after_a_run_of_successes():
+    session = FakeSession({("GET", rd.STEAM_API): [steam_page(match())]})
+    steam = rd.Steam(session, "k", pace=rd.Paced(4.0, sleep=lambda s: None), sleep=lambda s: None)
+    for _ in range(rd.STEAM_SPEEDUP_AFTER):
+        steam.page(1)
+    assert steam.pace.min_interval == pytest.approx(3.6)
+
+
 def test_seq_for_age_uses_observed_rate_and_returns_probe_page():
     newest = 1_000_000_000
     session = FakeSession({

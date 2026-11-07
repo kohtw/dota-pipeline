@@ -59,6 +59,12 @@ MIN_DURATION_S = 15 * 60  # drops remakes and early surrenders
 MAX_LEAVER_STATUS = 1  # 0 = stayed, 1 = disconnected but came back; 2+ = abandoned, AFK, never connected
 
 STEAM_DAILY_CAP = 95_000  # Valve allows 100,000 a day; the rest is headroom
+STEAM_START_INTERVAL_S = 2.0
+STEAM_MIN_INTERVAL_S = 1.0
+STEAM_MAX_INTERVAL_S = 60.0
+STEAM_BACKOFF_S = 15
+STEAM_MAX_RETRIES = 6
+STEAM_SPEEDUP_AFTER = 50  # successful calls before shortening the gap by 10%
 DAYS_BACK = 7  # where the Steam route starts on its first run
 HEAD_LAG_S = 3 * 3600  # near the newest matches, wait so most of them have finished
 CALLBACK_AFTER_S = 3600
@@ -283,25 +289,46 @@ class State:
 
 
 class Steam:
+    """Valve also rate-limits in the short term (429 after about 10 calls a second apart), so the
+    pace adapts: each 429 or 5xx doubles the gap between calls and backs off, and every run of
+    successful calls shrinks the gap again, down to STEAM_MIN_INTERVAL_S."""
+
     def __init__(self, session: requests.Session, key: str, state: State | None = None,
-                 pace: Paced | None = None, daily_cap: int = STEAM_DAILY_CAP):
-        self.session, self.key, self.state, self.daily_cap = session, key, state, daily_cap
-        self.pace = pace or Paced(1.0)
-        self.calls = 0
+                 pace: Paced | None = None, daily_cap: int = STEAM_DAILY_CAP,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.session, self.key, self.state, self.daily_cap, self.sleep = session, key, state, daily_cap, sleep
+        self.pace = pace or Paced(STEAM_START_INTERVAL_S)
+        self.calls = self.throttled = self.streak = 0
 
     def _get(self, endpoint: str, **params) -> requests.Response:
-        if self.state and self.state.calls_today("steam") >= self.daily_cap:
-            raise BudgetExhausted(f"Steam daily cap of {self.daily_cap} calls reached")
-        self.pace.wait()
-        self.calls += 1
-        if self.state:
-            self.state.count_call("steam")
-        try:
-            r = self.session.get(f"{STEAM_API}/{endpoint}/v1/", params={"key": self.key, **params}, timeout=60)
-            r.raise_for_status()
-        except requests.RequestException as e:
-            raise RuntimeError(f"Steam {endpoint}: {str(e).replace(self.key, '<key>')}") from None
-        return r
+        for attempt in range(STEAM_MAX_RETRIES + 1):
+            if self.state and self.state.calls_today("steam") >= self.daily_cap:
+                raise BudgetExhausted(f"Steam daily cap of {self.daily_cap} calls reached")
+            self.pace.wait()
+            self.calls += 1
+            if self.state:
+                self.state.count_call("steam")
+            try:
+                r = self.session.get(f"{STEAM_API}/{endpoint}/v1/", params={"key": self.key, **params}, timeout=60)
+            except requests.RequestException as e:
+                raise RuntimeError(f"Steam {endpoint}: {str(e).replace(self.key, '<key>')}") from None
+            if r.status_code == 429 or r.status_code >= 500:
+                self.throttled += 1
+                self.streak = 0
+                self.pace.min_interval = min(max(self.pace.min_interval, STEAM_MIN_INTERVAL_S) * 2, STEAM_MAX_INTERVAL_S)
+                backoff = min(STEAM_BACKOFF_S * 2 ** attempt, 600)
+                log.warning("Steam %s returned %d; waiting %ds, then 1 call every %.1fs",
+                            endpoint, r.status_code, backoff, self.pace.min_interval)
+                self.sleep(backoff)
+                continue
+            if not r.ok:
+                raise RuntimeError(f"Steam {endpoint}: HTTP {r.status_code}")
+            self.streak += 1
+            if self.streak >= STEAM_SPEEDUP_AFTER:
+                self.pace.min_interval = max(self.pace.min_interval * 0.9, STEAM_MIN_INTERVAL_S)
+                self.streak = 0
+            return r
+        raise BudgetExhausted(f"Steam kept refusing calls after {STEAM_MAX_RETRIES} retries; ending this run")
 
     def newest_seq(self) -> int:
         return self._get("GetMatchHistory", matches_requested=1).json()["result"]["matches"][0]["match_seq_num"]
@@ -437,7 +464,8 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
               sleep: Callable[[float], None] = time.sleep) -> None:
     deadline = time.monotonic() + max_minutes * 60
     state = State(cfg.db)
-    steam = Steam(requests.Session(), cfg.steam_key, state)
+    interval = float(state.get_meta("steam_interval") or STEAM_START_INTERVAL_S)  # pace learned last run
+    steam = Steam(requests.Session(), cfg.steam_key, state, pace=Paced(interval), sleep=sleep)
     staging = cfg.staging / "steam"
     dest = f"{cfg.drive_dest}/steam"
     pages = queued = waiting = finished = stored = since_upload = 0
@@ -471,11 +499,15 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
                 since_upload = 0
     except BudgetExhausted as e:
         log.info("stopping: %s", e)
+    except RuntimeError as e:  # the next hourly run resumes from the saved cursor
+        log.error("stopping on error: %s", e)
     finally:
+        state.set_meta("steam_interval", f"{steam.pace.min_interval:.2f}")
         upload(staging, dest)
         log.info("steam done: %d pages (%.1f MB gzipped), %d queued for replays, %d in progress, "
-                 "%d finished on callback, %d Steam calls today",
-                 pages, stored / 1e6, queued, waiting, finished, state.calls_today("steam"))
+                 "%d finished on callback, %d Steam calls today, %d throttled, pace 1 call every %.1fs",
+                 pages, stored / 1e6, queued, waiting, finished, state.calls_today("steam"),
+                 steam.throttled, steam.pace.min_interval)
 
 
 # Replay route
