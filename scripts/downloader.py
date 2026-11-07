@@ -79,7 +79,8 @@ MIN_REPLAY_AGE_S = 24 * 3600  # matches under an hour old had no replay salt on 
 RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
 ERROR_RETRY_S = 600
 MAX_ATTEMPTS = 3
-OPENDOTA_RESERVE = 20  # stop with this many daily calls left
+OPENDOTA_RESERVE = 20
+OPENDOTA_OUTAGE_AFTER = 5  # server errors in a row before a run gives up on OpenDota  # stop with this many daily calls left
 # Hard cap on OpenDota calls per UTC day, keyed or not. With a key each call costs about US$0.0001,
 # so 3,000 calls is about US$0.30 a day. Raise it with OPENDOTA_DAILY_CAP in .env.
 OPENDOTA_DAILY_CAP = 3000
@@ -98,6 +99,10 @@ log = logging.getLogger("downloader")
 
 class BudgetExhausted(Exception):
     pass
+
+
+class OpenDotaDown(RuntimeError):
+    """A 5xx or a failed connection: OpenDota's fault, not the match's, so it costs no attempt."""
 
 
 class ReplayGone(Exception):
@@ -383,6 +388,7 @@ class OpenDota:
         self.pace = pace or Paced(1.05)  # free tier: 60 calls a minute
         self.calls = 0
         self.remaining_day: int | None = None
+        self.server_errors = 0  # in a row
 
     def _call(self, method: str, path: str) -> requests.Response:
         for attempt in range(2):
@@ -400,7 +406,12 @@ class OpenDota:
             try:
                 r = self.session.request(method, f"{OPENDOTA_API}/{path}", params=params, timeout=30)
             except requests.RequestException as e:
-                raise RuntimeError(f"OpenDota {path}: {str(e).replace(self.key or '<none>', '<key>')}") from None
+                self._server_error()
+                raise OpenDotaDown(f"OpenDota {path}: {str(e).replace(self.key or '<none>', '<key>')}") from None
+            if r.status_code >= 500:
+                self._server_error()
+                raise OpenDotaDown(f"OpenDota {path}: HTTP {r.status_code}")
+            self.server_errors = 0
             day = r.headers.get("x-rate-limit-remaining-day")
             if day is not None:
                 self.remaining_day = int(day)
@@ -413,6 +424,11 @@ class OpenDota:
                 raise BudgetExhausted("OpenDota returned 429")
             self.sleep(60)
         raise AssertionError("unreachable")
+
+    def _server_error(self) -> None:
+        self.server_errors += 1
+        if self.server_errors >= OPENDOTA_OUTAGE_AFTER:
+            raise BudgetExhausted(f"OpenDota looks down: {self.server_errors} server errors in a row")
 
     def replay_url(self, match_id: int) -> str | None:
         r = self._call("GET", f"matches/{match_id}")
@@ -585,6 +601,10 @@ def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -
                 state.update(match_id, status="requested", attempts=attempts + 1,
                              next_try=time.time() + RETRY_AFTER_S)
             return None
+    except OpenDotaDown as e:
+        state.update(match_id, status="requested", next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
+        log.warning("resolve %s failed: %s", match_id, e)
+        return None
     except RuntimeError as e:
         failed = attempts + 1 >= MAX_ATTEMPTS
         state.update(match_id, status="failed" if failed else "requested", attempts=attempts + 1,

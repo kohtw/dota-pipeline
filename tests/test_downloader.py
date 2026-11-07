@@ -409,6 +409,18 @@ def test_opendota_error_schedules_a_retry(state: rd.State, tmp_path: Path):
     assert state.due(now=rd.MIN_REPLAY_AGE_S, limit=10) == [(2, "discovered", None, 0)]
 
 
+def test_opendota_outage_costs_no_attempt_and_stops_the_run(state: rd.State, tmp_path: Path):
+    session = FakeSession({("GET", rd.OPENDOTA_API): [FakeResponse(status=522)] * rd.OPENDOTA_OUTAGE_AFTER})
+    od = rd.OpenDota(session, None, pace=no_pace())
+    rd.resolve(state, od, (1, "discovered", None, 0))
+    assert state.db.execute("SELECT status, attempts FROM matches WHERE match_id = 1").fetchone() == ("requested", 0)
+    for _ in range(rd.OPENDOTA_OUTAGE_AFTER - 2):
+        with pytest.raises(rd.OpenDotaDown):
+            od.replay_url(2)
+    with pytest.raises(rd.BudgetExhausted):  # the fifth in a row
+        od.replay_url(2)
+
+
 def test_due_order_and_mark_uploaded(state: rd.State, tmp_path: Path):
     state.update(2, status="ready", replay_url="u")
     assert [row[0] for row in state.due(now=rd.MIN_REPLAY_AGE_S, limit=10)] == [2, 1]
