@@ -154,6 +154,26 @@ def test_steam_gives_up_the_run_when_throttling_persists():
     assert steam.pace.min_interval <= rd.STEAM_MAX_INTERVAL_S
 
 
+def test_steam_backoff_never_runs_past_the_deadline():
+    session = FakeSession({("GET", rd.STEAM_API): [FakeResponse(status=503)]})
+    slept: list[float] = []
+    steam = rd.Steam(session, "k", pace=no_pace(), sleep=slept.append, deadline=100, clock=lambda: 90)
+    with pytest.raises(rd.BudgetExhausted):
+        steam.page(1)
+    assert slept == []  # a 15s backoff would end after the deadline, so the run stops instead
+    assert len(session.calls) == 1
+
+
+def test_china_replay_hosts_are_skipped_without_downloading(state: rd.State):
+    session = FakeSession({("GET", rd.OPENDOTA_API): [
+        FakeResponse(json_data={"replay_url": "http://replay415.dota2.com.cn/570/1_9.dem.bz2"})]})
+    od = rd.OpenDota(session, None, pace=no_pace())
+    assert rd.resolve(state, od, (1, "discovered", None, 0)) is None
+    assert rd.resolve(state, od, (2, "ready", "http://replay413.dota2.com.cn/570/2_9.dem.bz2", 1)) is None
+    assert state.counts("matches")["unreachable"] == 2
+    assert len(session.calls) == 1  # the ready one needed no OpenDota call
+
+
 def test_steam_speeds_up_after_a_run_of_successes():
     session = FakeSession({("GET", rd.STEAM_API): [steam_page(match())]})
     steam = rd.Steam(session, "k", pace=rd.Paced(4.0, sleep=lambda s: None), sleep=lambda s: None)

@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from urllib.parse import urlparse
+
 import requests
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +90,8 @@ MIN_DOWNLOAD_BPS = 200_000  # give up (and retry later) below this average speed
 STALL_GRACE_S = 60  # ...once a download has run this long
 
 MIN_FREE_GB = 20
+# China-cluster replay servers (replay4xx.dota2.com.cn) time out on connect from here: skip, don't retry
+UNREACHABLE_REPLAY_HOSTS = (".dota2.com.cn",)
 
 log = logging.getLogger("downloader")
 
@@ -194,7 +198,7 @@ class State:
                 match_id      INTEGER PRIMARY KEY,
                 match_seq_num INTEGER,
                 start_time    INTEGER,
-                status        TEXT NOT NULL,  -- discovered|requested|ready|downloaded|uploaded|no_replay|gone|failed
+                status        TEXT NOT NULL,  -- discovered|requested|ready|downloading|downloaded|uploaded|no_replay|gone|unreachable|failed
                 attempts      INTEGER NOT NULL DEFAULT 0,
                 next_try      REAL NOT NULL DEFAULT 0,
                 replay_url    TEXT,
@@ -301,8 +305,10 @@ class Steam:
 
     def __init__(self, session: requests.Session, key: str, state: State | None = None,
                  pace: Paced | None = None, daily_cap: int = STEAM_DAILY_CAP,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, deadline: float = float("inf"),
+                 clock: Callable[[], float] = time.monotonic):
         self.session, self.key, self.state, self.daily_cap, self.sleep = session, key, state, daily_cap, sleep
+        self.deadline, self.clock = deadline, clock
         self.pace = pace or Paced(STEAM_START_INTERVAL_S)
         self.calls = self.throttled = self.streak = 0
 
@@ -323,6 +329,8 @@ class Steam:
                 self.streak = 0
                 self.pace.min_interval = min(max(self.pace.min_interval, STEAM_MIN_INTERVAL_S) * 2, STEAM_MAX_INTERVAL_S)
                 backoff = min(STEAM_BACKOFF_S * 2 ** attempt, 600)
+                if self.clock() + backoff > self.deadline:
+                    raise BudgetExhausted(f"Steam returned {r.status_code}; backing off past this run's time limit")
                 log.warning("Steam %s returned %d; waiting %ds, then 1 call every %.1fs",
                             endpoint, r.status_code, backoff, self.pace.min_interval)
                 self.sleep(backoff)
@@ -472,7 +480,7 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
     state = State(cfg.db)
     # start at half the pace learned last run, so each run probes for a faster rate
     interval = max(float(state.get_meta("steam_interval") or STEAM_START_INTERVAL_S) / 2, STEAM_MIN_INTERVAL_S)
-    steam = Steam(requests.Session(), cfg.steam_key, state, pace=Paced(interval), sleep=sleep)
+    steam = Steam(requests.Session(), cfg.steam_key, state, pace=Paced(interval), sleep=sleep, deadline=deadline)
     staging = cfg.staging / "steam"
     dest = f"{cfg.drive_dest}/steam"
     pages = queued = waiting = finished = stored = since_upload = 0
@@ -555,7 +563,7 @@ def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -
     """Gets a match's replay URL, or schedules a retry. Returns the URL when it is ready to download."""
     match_id, status, url, attempts = row
     if status == "ready":
-        return url
+        return None if url is None or _skip_unreachable(state, match_id, url) else url
     try:
         url = od.replay_url(match_id)
         if not url:
@@ -572,8 +580,17 @@ def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -
                      next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
         log.warning("resolve %s failed: %s", match_id, e)
         return None
+    if _skip_unreachable(state, match_id, url):
+        return None
     state.update(match_id, status="ready", replay_url=url)
     return url
+
+
+def _skip_unreachable(state: State, match_id: int, url: str) -> bool:
+    if (urlparse(url).hostname or "").endswith(UNREACHABLE_REPLAY_HOSTS):
+        state.update(match_id, status="unreachable", replay_url=url, error="replay host times out from here")
+        return True
+    return False
 
 
 def record_download(state: State, match_id: int, attempts: int, outcome: tuple[Path, int] | Exception) -> int:
