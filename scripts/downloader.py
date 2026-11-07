@@ -1,0 +1,632 @@
+"""
+Stopgap downloader: collect as much demo data as the API limits allow while the Airflow
+pipeline is being built. One machine runs it; files go to Google Drive with rclone.
+
+Two routes, run as separate processes:
+
+  steam    Walks Valve's match feed (GetMatchHistoryBySequenceNum, 100 matches per call) forward
+           from a saved cursor, up to 95,000 calls a day. Saves every page, gzipped. Queues
+           completed ranked All Pick matches for the replay route. Matches still in progress
+           when fetched go on a callback list and are fetched again once they have finished.
+  replays  Takes queued matches at least a day old, gets each replay URL from OpenDota
+           (60 calls a minute, 3,000 a day), and downloads the replay from Valve as delivered.
+
+State lives in SQLite, so both routes resume where they stopped and never repeat work.
+
+Drive layout (DRIVE_DEST):
+  steam/seq_{start_seq}.json.gz        one Steam page: 100 matches, every mode, unfiltered
+  steam/callback_{match_id}.json.gz    a match fetched again after it finished
+  replays/{match_id}.dem.zst           one replay, compressed as Valve serves it
+
+Config (environment, or a .env file at the repo root):
+  STEAM_API_KEY      required
+  OPENDOTA_API_KEY   optional; lifts the free daily limit (paid per call)
+  DRIVE_DEST         rclone destination  (default: "Google Drive:dota-pipeline/raw")
+  DOWNLOADER_HOME    state, staging, logs (default: ~/.local/share/dota-pipeline)
+
+Run:
+  python3 scripts/downloader.py check      # config only, no API calls
+  python3 scripts/downloader.py steam      # one pass of the Steam route
+  python3 scripts/downloader.py replays    # one pass of the replay route
+  python3 scripts/downloader.py status     # progress, no API calls
+"""
+
+import argparse
+import datetime as dt
+import fcntl
+import gzip
+import logging
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import requests
+
+ROOT = Path(__file__).resolve().parent.parent
+STEAM_API = "https://api.steampowered.com/IDOTA2Match_570"
+OPENDOTA_API = "https://api.opendota.com/api"
+
+RANKED_LOBBY = 7  # lobby_type 7 = ranked matchmaking
+ALL_PICK = 22  # game_mode 22 = All Pick; excludes Turbo (23)
+MIN_DURATION_S = 15 * 60  # drops remakes and early surrenders
+MAX_LEAVER_STATUS = 1  # 0 = stayed, 1 = disconnected but came back; 2+ = abandoned, AFK, never connected
+
+STEAM_DAILY_CAP = 95_000  # Valve allows 100,000 a day; the rest is headroom
+DAYS_BACK = 7  # where the Steam route starts on its first run
+HEAD_LAG_S = 3 * 3600  # near the newest matches, wait so most of them have finished
+CALLBACK_AFTER_S = 3600
+CALLBACK_MAX = 3
+STEAM_UPLOAD_EVERY = 100  # pages per rclone batch
+
+MIN_REPLAY_AGE_S = 24 * 3600  # matches under an hour old had no replay salt on OpenDota
+RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
+ERROR_RETRY_S = 600
+MAX_ATTEMPTS = 3
+OPENDOTA_RESERVE = 20  # stop with this many daily calls left
+REPLAY_UPLOAD_EVERY = 20
+
+MIN_FREE_GB = 20
+
+log = logging.getLogger("downloader")
+
+
+class BudgetExhausted(Exception):
+    pass
+
+
+class ReplayGone(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Config:
+    steam_key: str
+    opendota_key: str | None
+    drive_dest: str
+    home: Path
+
+    @property
+    def db(self) -> Path:
+        return self.home / "state.db"
+
+    @property
+    def staging(self) -> Path:
+        return self.home / "staging"
+
+
+def load_dotenv(path: Path) -> None:
+    """Sets variables from a KEY=VALUE file without overriding the environment."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+def load_config() -> Config:
+    load_dotenv(ROOT / ".env")
+    return Config(
+        steam_key=os.environ.get("STEAM_API_KEY", ""),
+        opendota_key=os.environ.get("OPENDOTA_API_KEY") or None,
+        drive_dest=os.environ.get("DRIVE_DEST", "Google Drive:dota-pipeline/raw"),
+        home=Path(os.environ.get("DOWNLOADER_HOME", Path.home() / ".local/share/dota-pipeline")),
+    )
+
+
+def is_ranked_all_pick(match: dict) -> bool:
+    return match.get("lobby_type") == RANKED_LOBBY and match.get("game_mode") == ALL_PICK
+
+
+def is_in_progress(match: dict) -> bool:
+    return match.get("duration", 0) == 0
+
+
+def is_completed_ranked_all_pick(match: dict) -> bool:
+    """Ranked All Pick, played to a normal finish: long enough, and nobody abandoned."""
+    players = match.get("players", [])
+    return (
+        is_ranked_all_pick(match)
+        and match.get("duration", 0) >= MIN_DURATION_S
+        and "radiant_win" in match
+        and len(players) == 10
+        and all(p.get("leaver_status", 0) <= MAX_LEAVER_STATUS for p in players)
+    )
+
+
+def replay_suffix(head: bytes) -> str:
+    if head.startswith(b"\x28\xb5\x2f\xfd"):
+        return ".dem.zst"
+    if head.startswith(b"BZh"):
+        return ".dem.bz2"
+    if head.startswith(b"PBDEMS2"):
+        return ".dem"
+    raise ValueError(f"unknown replay format, first bytes {head[:8]!r}")
+
+
+class Paced:
+    """Keeps at least min_interval seconds between calls."""
+
+    def __init__(self, min_interval: float, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.min_interval, self.clock, self.sleep = min_interval, clock, sleep
+        self.last = float("-inf")
+
+    def wait(self) -> None:
+        gap = self.clock() - self.last
+        if gap < self.min_interval:
+            self.sleep(self.min_interval - gap)
+        self.last = self.clock()
+
+
+class State:
+    def __init__(self, path: Path):
+        self.db = sqlite3.connect(path, timeout=30)  # both routes share this file
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS matches (
+                match_id      INTEGER PRIMARY KEY,
+                match_seq_num INTEGER,
+                start_time    INTEGER,
+                status        TEXT NOT NULL,  -- discovered|requested|ready|downloaded|uploaded|no_replay|gone|failed
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                next_try      REAL NOT NULL DEFAULT 0,
+                replay_url    TEXT,
+                file          TEXT,
+                bytes         INTEGER,
+                error         TEXT,
+                updated       REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS callbacks (
+                match_id      INTEGER PRIMARY KEY,
+                match_seq_num INTEGER NOT NULL,
+                status        TEXT NOT NULL,  -- pending|done|gave_up
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                next_try      REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS api_calls (day TEXT, api TEXT, n INTEGER NOT NULL, PRIMARY KEY (day, api));
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """)
+        self.db.commit()
+
+    # API call counts, per UTC day
+    def count_call(self, api: str) -> int:
+        day = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        self.db.execute("INSERT INTO api_calls VALUES (?, ?, 1) ON CONFLICT (day, api) DO UPDATE SET n = n + 1",
+                        (day, api))
+        self.db.commit()
+        return self.calls_today(api)
+
+    def calls_today(self, api: str) -> int:
+        day = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        row = self.db.execute("SELECT n FROM api_calls WHERE day = ? AND api = ?", (day, api)).fetchone()
+        return row[0] if row else 0
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+        self.db.commit()
+
+    # Replay queue
+    def add_discovered(self, matches: list[dict]) -> int:
+        before = self.db.total_changes
+        self.db.executemany(
+            "INSERT OR IGNORE INTO matches (match_id, match_seq_num, start_time, status, updated) "
+            "VALUES (?, ?, ?, 'discovered', ?)",
+            [(m["match_id"], m["match_seq_num"], m["start_time"], time.time()) for m in matches],
+        )
+        self.db.commit()
+        return self.db.total_changes - before
+
+    def due(self, now: float, limit: int) -> list[tuple[int, str, str | None, int]]:
+        """Replay work: ready first, then retries that are due, then new matches old enough to have a salt."""
+        return self.db.execute(
+            "SELECT match_id, status, replay_url, attempts FROM matches "
+            "WHERE status = 'ready' OR (status = 'requested' AND next_try <= ?) "
+            "   OR (status = 'discovered' AND start_time <= ?) "
+            "ORDER BY CASE status WHEN 'ready' THEN 0 WHEN 'requested' THEN 1 ELSE 2 END, match_id DESC "
+            "LIMIT ?", (now, now - MIN_REPLAY_AGE_S, limit)).fetchall()
+
+    def update(self, match_id: int, **fields) -> None:
+        fields["updated"] = time.time()
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        self.db.execute(f"UPDATE matches SET {cols} WHERE match_id = ?", (*fields.values(), match_id))
+        self.db.commit()
+
+    def mark_uploaded(self) -> int:
+        rows = self.db.execute("SELECT match_id, file FROM matches WHERE status = 'downloaded'").fetchall()
+        done = [mid for mid, file in rows if file and not Path(file).exists()]
+        for mid in done:
+            self.update(mid, status="uploaded")
+        return len(done)
+
+    # Callbacks for matches fetched while still in progress
+    def add_callbacks(self, matches: list[dict], now: float) -> int:
+        before = self.db.total_changes
+        self.db.executemany(
+            "INSERT OR IGNORE INTO callbacks VALUES (?, ?, 'pending', 0, ?)",
+            [(m["match_id"], m["match_seq_num"], now + CALLBACK_AFTER_S) for m in matches],
+        )
+        self.db.commit()
+        return self.db.total_changes - before
+
+    def due_callbacks(self, now: float, limit: int) -> list[tuple[int, int, int]]:
+        return self.db.execute(
+            "SELECT match_id, match_seq_num, attempts FROM callbacks WHERE status = 'pending' AND next_try <= ? "
+            "ORDER BY next_try LIMIT ?", (now, limit)).fetchall()
+
+    def update_callback(self, match_id: int, status: str, attempts: int, next_try: float = 0) -> None:
+        self.db.execute("UPDATE callbacks SET status = ?, attempts = ?, next_try = ? WHERE match_id = ?",
+                        (status, attempts, next_try, match_id))
+        self.db.commit()
+
+    def counts(self, table: str) -> dict[str, int]:
+        return dict(self.db.execute(f"SELECT status, COUNT(*) FROM {table} GROUP BY status").fetchall())
+
+
+class Steam:
+    def __init__(self, session: requests.Session, key: str, state: State | None = None,
+                 pace: Paced | None = None, daily_cap: int = STEAM_DAILY_CAP):
+        self.session, self.key, self.state, self.daily_cap = session, key, state, daily_cap
+        self.pace = pace or Paced(1.0)
+        self.calls = 0
+
+    def _get(self, endpoint: str, **params) -> requests.Response:
+        if self.state and self.state.calls_today("steam") >= self.daily_cap:
+            raise BudgetExhausted(f"Steam daily cap of {self.daily_cap} calls reached")
+        self.pace.wait()
+        self.calls += 1
+        if self.state:
+            self.state.count_call("steam")
+        try:
+            r = self.session.get(f"{STEAM_API}/{endpoint}/v1/", params={"key": self.key, **params}, timeout=60)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"Steam {endpoint}: {str(e).replace(self.key, '<key>')}") from None
+        return r
+
+    def newest_seq(self) -> int:
+        return self._get("GetMatchHistory", matches_requested=1).json()["result"]["matches"][0]["match_seq_num"]
+
+    def page(self, start_seq: int, count: int = 100) -> tuple[bytes, list[dict]]:
+        r = self._get("GetMatchHistoryBySequenceNum", start_at_match_seq_num=start_seq, matches_requested=count)
+        return r.content, r.json()["result"].get("matches", [])
+
+    def seq_for_age(self, hours: float, now: float, probe_back: int = 1_000_000) -> tuple[int, int, bytes]:
+        """Estimates the match_seq_num of matches that started `hours` ago, from the seq rate.
+
+        Returns (estimate, probe_seq, probe_page) so the caller can keep the probe page.
+        """
+        newest = self.newest_seq()
+        probe = newest - probe_back
+        raw, matches = self.page(probe)
+        if not matches:
+            return probe, probe, raw
+        first = matches[0]
+        rate = (newest - first["match_seq_num"]) / max(now - first["start_time"], 1)
+        return max(int(newest - rate * hours * 3600), 0), probe, raw
+
+
+class OpenDota:
+    def __init__(self, session: requests.Session, key: str | None, reserve: int = OPENDOTA_RESERVE,
+                 pace: Paced | None = None, sleep: Callable[[float], None] = time.sleep):
+        self.session, self.key, self.reserve, self.sleep = session, key, reserve, sleep
+        self.pace = pace or Paced(1.05)  # free tier: 60 calls a minute
+        self.calls = 0
+        self.remaining_day: int | None = None
+
+    def _call(self, method: str, path: str) -> requests.Response:
+        for attempt in range(2):
+            if self.remaining_day is not None and self.remaining_day <= self.reserve:
+                raise BudgetExhausted(f"OpenDota daily calls left: {self.remaining_day}")
+            self.pace.wait()
+            self.calls += 1
+            params = {"api_key": self.key} if self.key else {}
+            try:
+                r = self.session.request(method, f"{OPENDOTA_API}/{path}", params=params, timeout=30)
+            except requests.RequestException as e:
+                raise RuntimeError(f"OpenDota {path}: {str(e).replace(self.key or '<none>', '<key>')}") from None
+            day = r.headers.get("x-rate-limit-remaining-day")
+            if day is not None:
+                self.remaining_day = int(day)
+            if r.status_code != 429:
+                return r
+            if self.remaining_day == 0 or attempt == 1:
+                raise BudgetExhausted("OpenDota returned 429")
+            self.sleep(60)
+        raise AssertionError("unreachable")
+
+    def replay_url(self, match_id: int) -> str | None:
+        r = self._call("GET", f"matches/{match_id}")
+        if r.status_code == 404:
+            return None
+        if not r.ok:
+            raise RuntimeError(f"OpenDota matches/{match_id}: HTTP {r.status_code}")
+        return r.json().get("replay_url")
+
+    def request_fetch(self, match_id: int) -> None:
+        r = self._call("POST", f"request/{match_id}")
+        if not r.ok:
+            raise RuntimeError(f"OpenDota request/{match_id}: HTTP {r.status_code}")
+
+
+def save_gz(dest: Path, name: str, raw: bytes) -> int:
+    dest.mkdir(parents=True, exist_ok=True)
+    data = gzip.compress(raw)
+    part = dest / f"{name}.part"
+    part.write_bytes(data)
+    part.rename(dest / name)
+    return len(data)
+
+
+def upload(local: Path, dest: str) -> bool:
+    """Moves finished files to Drive. rclone deletes each local file after it uploads."""
+    if not local.exists():
+        return True
+    result = subprocess.run(
+        ["rclone", "move", str(local), dest, "--exclude", "*.part", "--transfers", "4"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.error("rclone move failed: %s", result.stderr.strip()[-500:])
+    return result.returncode == 0
+
+
+def disk_low(path: Path) -> bool:
+    if shutil.disk_usage(path).free < MIN_FREE_GB * 1e9:
+        log.warning("free disk below %d GB; stopping", MIN_FREE_GB)
+        return True
+    return False
+
+
+# Steam route
+
+def take_page(state: State, matches: list[dict], now: float) -> tuple[int, int]:
+    """Queues completed ranked All Pick matches and puts in-progress ones on the callback list."""
+    queued = state.add_discovered([m for m in matches if is_completed_ranked_all_pick(m)])
+    waiting = state.add_callbacks([m for m in matches if is_in_progress(m)], now)
+    return queued, waiting
+
+
+def run_callbacks(state: State, steam: Steam, staging: Path, now: float, limit: int = 20) -> int:
+    """Fetches in-progress matches again, one call each. Returns how many have now finished."""
+    finished = 0
+    for match_id, seq, attempts in state.due_callbacks(now, limit):
+        raw, matches = steam.page(seq, count=1)
+        match = next((m for m in matches if m["match_id"] == match_id), None)
+        if match and not is_in_progress(match):
+            save_gz(staging, f"callback_{match_id}.json.gz", raw)
+            if is_completed_ranked_all_pick(match):
+                state.add_discovered([match])
+            state.update_callback(match_id, "done", attempts + 1)
+            finished += 1
+        elif attempts + 1 >= CALLBACK_MAX:
+            state.update_callback(match_id, "gave_up", attempts + 1)
+        else:
+            state.update_callback(match_id, "pending", attempts + 1, now + CALLBACK_AFTER_S)
+    return finished
+
+
+def run_steam(cfg: Config, max_minutes: float, days_back: float,
+              sleep: Callable[[float], None] = time.sleep) -> None:
+    deadline = time.monotonic() + max_minutes * 60
+    state = State(cfg.db)
+    steam = Steam(requests.Session(), cfg.steam_key, state)
+    staging = cfg.staging / "steam"
+    dest = f"{cfg.drive_dest}/steam"
+    pages = queued = waiting = finished = stored = since_upload = 0
+    try:
+        cursor_text = state.get_meta("steam_cursor")
+        if cursor_text is None:
+            start, probe, probe_raw = steam.seq_for_age(days_back * 24, time.time())
+            stored += save_gz(staging, f"seq_{probe}.json.gz", probe_raw)
+            cursor = start
+            log.info("first run: starting %.1f days back at seq %d", days_back, cursor)
+        else:
+            cursor = int(cursor_text)
+        while time.monotonic() < deadline and not disk_low(cfg.home):
+            finished += run_callbacks(state, steam, staging, time.time())
+            raw, matches = steam.page(cursor)
+            if not matches or time.time() - matches[0]["start_time"] < HEAD_LAG_S:
+                # caught up with live games: wait rather than store pages that are mostly unfinished
+                sleep(min(300, max(deadline - time.monotonic(), 0)))
+                continue
+            stored += save_gz(staging, f"seq_{cursor}.json.gz", raw)
+            q, w = take_page(state, matches, time.time())
+            queued, waiting, pages, since_upload = queued + q, waiting + w, pages + 1, since_upload + 1
+            cursor = matches[-1]["match_seq_num"] + 1
+            state.set_meta("steam_cursor", str(cursor))
+            if pages % 50 == 1:
+                age_h = (time.time() - matches[0]["start_time"]) / 3600
+                log.info("seq %d (%.1f h old): %d matches, %d ranked All Pick, %d completed queued, %d in progress",
+                         cursor, age_h, len(matches), sum(map(is_ranked_all_pick, matches)), q, w)
+            if since_upload >= STEAM_UPLOAD_EVERY:
+                upload(staging, dest)
+                since_upload = 0
+    except BudgetExhausted as e:
+        log.info("stopping: %s", e)
+    finally:
+        upload(staging, dest)
+        log.info("steam done: %d pages (%.1f MB gzipped), %d queued for replays, %d in progress, "
+                 "%d finished on callback, %d Steam calls today",
+                 pages, stored / 1e6, queued, waiting, finished, state.calls_today("steam"))
+
+
+# Replay route
+
+def download_replay(session: requests.Session, url: str, dest: Path, match_id: int) -> tuple[Path, int]:
+    dest.mkdir(parents=True, exist_ok=True)
+    part = dest / f"{match_id}.part"
+    size, head = 0, b""
+    with session.get(url, stream=True, timeout=60) as r:
+        if r.status_code == 404:
+            raise ReplayGone(f"Valve has no replay for {match_id}")
+        r.raise_for_status()
+        with open(part, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if not head:
+                    head = chunk[:16]
+                f.write(chunk)
+                size += len(chunk)
+    final = dest / f"{match_id}{replay_suffix(head)}"
+    part.rename(final)
+    return final, size
+
+
+def resolve_and_download(state: State, od: OpenDota, session: requests.Session, staging: Path,
+                         row: tuple[int, str, str | None, int]) -> int:
+    """Works one match forward. Returns bytes downloaded (0 if none)."""
+    match_id, status, url, attempts = row
+    if status != "ready":
+        try:
+            url = od.replay_url(match_id)
+            if not url:
+                if attempts + 1 >= MAX_ATTEMPTS:
+                    state.update(match_id, status="no_replay", attempts=attempts + 1)
+                else:
+                    od.request_fetch(match_id)
+                    state.update(match_id, status="requested", attempts=attempts + 1,
+                                 next_try=time.time() + RETRY_AFTER_S)
+                return 0
+        except RuntimeError as e:
+            failed = attempts + 1 >= MAX_ATTEMPTS
+            state.update(match_id, status="failed" if failed else "requested", attempts=attempts + 1,
+                         next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
+            log.warning("resolve %s failed: %s", match_id, e)
+            return 0
+        state.update(match_id, status="ready", replay_url=url)
+    try:
+        path, size = download_replay(session, url, staging, match_id)
+    except ReplayGone as e:
+        state.update(match_id, status="gone", error=str(e))
+        return 0
+    except (requests.RequestException, ValueError, OSError) as e:
+        failed = attempts + 1 >= MAX_ATTEMPTS
+        state.update(match_id, status="failed" if failed else "ready", attempts=attempts + 1, error=str(e)[:300])
+        log.warning("download %s failed: %s", match_id, e)
+        return 0
+    state.update(match_id, status="downloaded", file=str(path), bytes=size, error=None)
+    return size
+
+
+def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] = time.sleep) -> None:
+    deadline = time.monotonic() + max_minutes * 60
+    state = State(cfg.db)
+    session = requests.Session()
+    od = OpenDota(session, cfg.opendota_key)
+    staging = cfg.staging / "replays"
+    dest = f"{cfg.drive_dest}/replays"
+    replays = total_bytes = since_upload = 0
+    try:
+        while time.monotonic() < deadline and not disk_low(cfg.home):
+            batch = state.due(time.time(), 25)
+            if not batch:  # the Steam route has not queued anything old enough yet
+                sleep(min(300, max(deadline - time.monotonic(), 0)))
+                continue
+            for row in batch:
+                if time.monotonic() >= deadline:
+                    break
+                size = resolve_and_download(state, od, session, staging, row)
+                if size:
+                    replays, total_bytes, since_upload = replays + 1, total_bytes + size, since_upload + 1
+                if since_upload >= REPLAY_UPLOAD_EVERY:
+                    if upload(staging, dest):
+                        state.mark_uploaded()
+                    since_upload = 0
+    except BudgetExhausted as e:
+        log.info("stopping: %s", e)
+    finally:
+        if upload(staging, dest):
+            state.mark_uploaded()
+        log.info("replays done: %d replays (%.1f GB), %d OpenDota calls, OpenDota calls left today: %s",
+                 replays, total_bytes / 1e9, od.calls, od.remaining_day)
+
+
+def check(cfg: Config) -> bool:
+    """Validates config without calling any API."""
+    ok = True
+
+    def report(passed: bool, message: str) -> None:
+        nonlocal ok
+        ok &= passed
+        print(("ok    " if passed else "FAIL  ") + message)
+
+    report(bool(cfg.steam_key), "STEAM_API_KEY is set")
+    print(f"info  OPENDOTA_API_KEY {'is set' if cfg.opendota_key else 'not set; free tier, 3,000 calls a day'}")
+    rclone = shutil.which("rclone")
+    report(rclone is not None, "rclone is installed")
+    if rclone:
+        remotes = subprocess.run([rclone, "listremotes"], capture_output=True, text=True).stdout.splitlines()
+        remote = cfg.drive_dest.split(":", 1)[0] + ":"
+        report(remote in remotes, f"rclone remote {remote!r} exists")
+    free_gb = shutil.disk_usage(cfg.home if cfg.home.exists() else Path.home()).free / 1e9
+    report(free_gb >= MIN_FREE_GB, f"free disk {free_gb:.0f} GB (need {MIN_FREE_GB})")
+    print(f"info  state and staging: {cfg.home}")
+    print(f"info  Drive destination: {cfg.drive_dest}")
+    return ok
+
+
+def status(cfg: Config) -> None:
+    state = State(cfg.db)
+    print(f"Steam calls today: {state.calls_today('steam')} of {STEAM_DAILY_CAP}")
+    print(f"Steam cursor: {state.get_meta('steam_cursor') or 'not started'}")
+    print("Callbacks:", state.counts("callbacks") or "none")
+    print("Replay queue:")
+    for name, n in sorted(state.counts("matches").items()):
+        print(f"  {name:<11} {n}")
+    total = state.db.execute("SELECT COALESCE(SUM(bytes), 0) FROM matches").fetchone()[0]
+    print(f"Replays downloaded: {total / 1e9:.1f} GB")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("steam")
+    s.add_argument("--max-minutes", type=float, default=55)
+    s.add_argument("--days-back", type=float, default=DAYS_BACK, help="first run only")
+    r = sub.add_parser("replays")
+    r.add_argument("--max-minutes", type=float, default=55)
+    sub.add_parser("check")
+    sub.add_parser("status")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    if args.cmd == "check":
+        sys.exit(0 if check(cfg) else 1)
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    if args.cmd == "status":
+        status(cfg)
+        return
+    if not cfg.steam_key and args.cmd == "steam":
+        sys.exit("STEAM_API_KEY is not set; run `check` for details")
+
+    (cfg.home / "logs").mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO, format=f"%(asctime)s {args.cmd} %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(cfg.home / "logs" / f"{args.cmd}.log")],
+    )
+    with open(cfg.home / f"{args.cmd}.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.info("another %s run is in progress; exiting", args.cmd)
+            return
+        if args.cmd == "steam":
+            run_steam(cfg, args.max_minutes, args.days_back)
+        else:
+            run_replays(cfg, args.max_minutes)
+
+
+if __name__ == "__main__":
+    main()
