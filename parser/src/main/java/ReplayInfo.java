@@ -11,8 +11,11 @@ import skadistats.clarity.processor.gameevents.OnCombatLogEntry;
 import skadistats.clarity.processor.reader.OnTickStart;
 import skadistats.clarity.processor.runner.Context;
 import skadistats.clarity.processor.runner.SimpleRunner;
+import skadistats.clarity.source.InputStreamSource;
 import skadistats.clarity.source.MappedFileSource;
+import skadistats.clarity.source.Source;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.Writer;
 import java.lang.reflect.Method;
@@ -24,27 +27,53 @@ import java.util.Map;
 import java.util.StringJoiner;
 import java.util.TreeMap;
 
-/** Usage: ReplayInfo <replay.dem> <out.json> -- writes basic match info as JSON, plus <out>.combatlog.csv, <out>.positions.csv and <out>.names.csv. */
+/**
+ * Usage:
+ *   ReplayInfo <replay.dem> <out.json>
+ *     local: writes basic match info as JSON, plus <out>.combatlog.csv, <out>.positions.csv and <out>.names.csv.
+ *   ReplayInfo s3://bucket/replays/<id>.dem s3://bucket/parsed/<id>/
+ *     S3 (Garage): reads the replay into memory, uploads match.json, combatlog.csv, positions.csv, names.csv
+ *     under the prefix. Needs env S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY.
+ */
 public class ReplayInfo {
 
+    interface SourceFactory { Source open() throws IOException; }
+
     public static void main(String[] args) throws Exception {
-        var info = Clarity.infoForFile(args[0]);
+        if (args[0].startsWith("s3://")) {
+            byte[] dem = S3Io.get(args[0]);
+            Path tmp = Files.createTempDirectory("parsed");  // container-local scratch, uploaded then discarded
+            parse(() -> new InputStreamSource(new ByteArrayInputStream(dem)),
+                    tmp.resolve("match.json"), tmp.resolve("combatlog.csv"),
+                    tmp.resolve("positions.csv"), tmp.resolve("names.csv"));
+            S3Io.putDir(tmp, args[1]);
+            return;
+        }
+        // logs next to the json: <out>.json -> <out>.combatlog.csv, <out>.positions.csv, <out>.names.csv
+        String base = args[1].replaceFirst("\\.json$", "");
+        parse(() -> new MappedFileSource(args[0]), Path.of(args[1]), Path.of(base + ".combatlog.csv"),
+                Path.of(base + ".positions.csv"), Path.of(base + ".names.csv"));
+    }
+
+    static void parse(SourceFactory src, Path jsonOut, Path combatOut, Path posOut, Path namesOut) throws Exception {
+        var infoSource = src.open();
+        var info = Clarity.infoForSource(infoSource);
+        infoSource.close();
         var dota = info.getGameInfo().getDota();
 
         long matchId = dota.getMatchId();
         List<String> heroes = dota.getPlayerInfoList().stream().map(p -> p.getHeroName()).toList();
 
-        // logs next to the json: <out>.json -> <out>.combatlog.csv, <out>.positions.csv, <out>.names.csv
-        String base = args[1].replaceFirst("\\.json$", "");
         var names = new CombatLogNames(matchId);
         var gameStart = new GameStart();
-        try (var out = Files.newBufferedWriter(Path.of(base + ".combatlog.csv"));
-             var posOut = Files.newBufferedWriter(Path.of(base + ".positions.csv"))) {
-            new SimpleRunner(new MappedFileSource(args[0]))
-                    .runWith(new CombatLogCsv(out, matchId), new PositionDump(posOut, matchId, heroes),
+        try (var out = Files.newBufferedWriter(combatOut);
+             var posWriter = Files.newBufferedWriter(posOut);
+             var source = src.open()) {
+            new SimpleRunner(source)
+                    .runWith(new CombatLogCsv(out, matchId), new PositionDump(posWriter, matchId, heroes),
                             names, gameStart);
         }
-        names.write(Path.of(base + ".names.csv"));
+        names.write(namesOut);
 
         var players = new StringBuilder();
         int slot = 0;
@@ -63,7 +92,7 @@ public class ReplayInfo {
                 + "  \"game_start_time\": " + gameStart.time + ",\n"
                 + "  \"players\": [\n" + players + "\n  ]\n"
                 + "}\n";
-        Files.writeString(Path.of(args[1]), json);
+        Files.writeString(jsonOut, json);
     }
 
     /**

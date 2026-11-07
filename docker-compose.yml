@@ -2,7 +2,7 @@
 #   docker build -t dota-parser parser
 #   docker compose up --build
 # UI: http://localhost:8080 (no login)
-# S3 (Garage): http://localhost:3900, region us-east-1, path-style; creds below (dev only)
+# S3 (Garage): http://localhost:3900 (API only; browse via garage-webui at http://localhost:3909), region us-east-1, path-style; creds below (dev only)
 
 x-s3-creds: &s3-creds
   S3_ACCESS_KEY: GK1a2b3c4d5e6f7a8b9c0d1e2f
@@ -20,6 +20,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     <<: *s3-creds
     S3_ENDPOINT: http://garage:3900
+    STEAM_API_KEY: ${STEAM_API_KEY:-}  # from .env; https://steamcommunity.com/dev/apikey
   volumes:
     - ./dags:/opt/airflow/dags
     - dota-data:/data
@@ -69,6 +70,20 @@ services:
       test: ["CMD", "test", "-f", "/tmp/ready"]
       interval: 5s
       retries: 20
+
+  # browser UI for Garage: http://localhost:3909 (no login)
+  garage-webui:
+    image: khairul169/garage-webui:1.1.0
+    ports:
+      - "3909:3909"
+    environment:
+      API_BASE_URL: http://garage:3903  # admin API
+      API_ADMIN_KEY: 31c4c6bee1bcba9d0f6f148e60b44c8c4a3e3481168d8d8f33408519ecd8c5e1  # = admin_token in garage.toml
+      S3_ENDPOINT_URL: http://garage:3900
+      S3_REGION: us-east-1
+    depends_on:
+      garage:
+        condition: service_healthy
 
   airflow-init:
     <<: *airflow-common
