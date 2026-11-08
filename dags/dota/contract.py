@@ -64,6 +64,20 @@ def check_match_json(text: str, match_id: int) -> None:
             raise ContractError(f"match.json: bad player entry {p}")
 
 
+def unparsed(replay_keys: list[str], parsed_keys: list[str]) -> list[int]:
+    """Match ids that have a replay but not all four parsed files, newest first. A parse that
+    died halfway left only some files, so it counts as unparsed and runs again."""
+    replays = {int(k.removeprefix("replays/").removesuffix(".dem"))
+               for k in replay_keys if k.startswith("replays/") and k.endswith(".dem")}
+    found: dict[int, set[str]] = {}
+    for key in parsed_keys:
+        parts = key.split("/")
+        if len(parts) == 3 and parts[0] == "parsed" and parts[1].isdigit():
+            found.setdefault(int(parts[1]), set()).add(parts[2])
+    complete = {mid for mid, names in found.items() if set(PARSED_FILES) <= names}
+    return sorted(replays - complete, reverse=True)
+
+
 def check_parsed(match_id: int, read: Callable[[str], bytes]) -> dict[str, int]:
     """Checks all four parsed files for one match. `read(key)` returns an object's bytes.
     Returns rows per CSV, for the task log. Raises ContractError on the first problem."""

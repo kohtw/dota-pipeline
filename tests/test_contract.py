@@ -65,6 +65,12 @@ def test_bad_match_json_fails(overrides: dict, message: str):
         contract.check_match_json(match_json(**overrides), MATCH)
 
 
+def test_unparsed_finds_new_and_half_parsed_replays_newest_first():
+    replays = ["replays/1.dem", "replays/2.dem", "replays/3.dem", "replays/notes.txt"]
+    parsed = [f"parsed/1/{name}" for name in contract.PARSED_FILES] + ["parsed/2/match.json"]
+    assert contract.unparsed(replays, parsed) == [3, 2]
+
+
 def test_missing_match_json_field_fails():
     data = json.loads(match_json())
     del data["game_start_tick"]
