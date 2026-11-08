@@ -32,6 +32,17 @@ def exists(key: str) -> bool:
         raise
 
 
+def read(key: str) -> bytes:
+    return client().get_object(Bucket=BUCKET, Key=key)["Body"].read()
+
+
+def list_keys(prefix: str) -> list[str]:
+    keys = []
+    for page in client().get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
+        keys += [obj["Key"] for obj in page.get("Contents", [])]
+    return keys
+
+
 def upload_replay(url: str, key: str) -> None:
     """Stream a Valve replay into the bucket, decompressing on the way (no local file).
     Valve serves zstd despite the .bz2 name. A multipart upload only appears when
