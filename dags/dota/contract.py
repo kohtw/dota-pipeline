@@ -1,23 +1,38 @@
 """Checks a match's parsed output against docs/data-contract.md before anything downstream
-reads it, so a parser change that breaks the contract fails here, not in Spark or dbt."""
+reads it, so a parser change that breaks the contract fails here, not in Spark or dbt.
 
-import csv
+Parsed layout: parsed/{table}/match_id={id}/part-*.parquet, plus parsed/_complete/match_id={id}/
+which the parser writes last, so its presence means every table of that match was written.
+pyarrow is imported inside functions: DAG files import this module at parse time."""
+
 import io
-import json
+import re
 from typing import Callable
 
-PARSED_FILES = ("match.json", "combatlog.csv", "positions.csv", "names.csv")
+COMPLETE = "_complete"  # marker dataset, written after all tables
 
 # Required columns only: the contract allows new columns, so extra ones are fine.
+# match_id is the partition (in the path), not a column inside the files.
 REQUIRED_COLUMNS = {
-    "combatlog.csv": ("match_id", "tick", "type", "timestamp", "attacker_name", "target_name",
-                      "inflictor_name", "value", "value_name"),
-    "positions.csv": ("match_id", "tick", "hero", "team", "x", "y"),
-    "names.csv": ("match_id", "idx", "name"),
+    "match": ("game_mode", "game_winner", "end_time"),
+    "players": ("slot", "hero_name", "game_team"),
+    "combatlog": ("tick", "type", "timestamp", "attacker_name_idx", "target_name_idx", "inflictor_name_idx",
+                  "value"),
+    "names": ("idx", "name"),
+    "entity_names": ("idx", "name"),
+    "gamerules": ("tick", "handle", "class", "m_pGameRules.m_nGameState", "m_pGameRules.m_flGameStartTime"),
+    "heroes": ("tick", "handle", "class", "m_iPlayerID", "m_iTeamNum", "m_hReplicatingOtherHeroModel",
+               "CBodyComponent.m_cellX", "CBodyComponent.m_cellY", "CBodyComponent.m_vecX",
+               "CBodyComponent.m_vecY", "m_hItems.0000"),
+    "player_resource": ("tick", "handle", "class", "index", "m_vecPlayerData.m_iPlayerTeam",
+                        "m_vecPlayerTeamData.m_iTeamSlot", "m_vecPlayerTeamData.m_nSelectedHeroID"),
+    "team_data": ("tick", "handle", "class", "index", "m_vecDataTeam.m_iNetWorth"),
+    "wards": ("tick", "event", "handle", "class", "m_nPlayerOwnerID", "m_iTeamNum"),
+    "item_entities": ("tick", "event", "handle", "class", "m_pEntity.m_nameStringTableIndex"),
 }
-NON_EMPTY = ("combatlog.csv", "positions.csv")  # a real match always has these rows
-MATCH_FIELDS = ("match_id", "game_mode", "winner", "end_time", "game_start_tick", "game_start_time", "players")
-PLAYER_FIELDS = ("slot", "hero", "team")
+# Spark writes no partition for a table with no rows; these can legitimately be empty
+# (e.g. no one placed a ward). Every other table must have rows.
+MAY_BE_EMPTY = ("wards",)
 TEAMS = (2, 3)
 
 
@@ -25,62 +40,68 @@ class ContractError(Exception):
     pass
 
 
-def parsed_key(match_id: int, name: str) -> str:
-    return f"parsed/{match_id}/{name}"
+def partition_prefix(table: str, match_id: int) -> str:
+    return f"parsed/{table}/match_id={match_id}/"
 
 
-def check_csv(name: str, text: str, match_id: int) -> int:
-    """Checks one CSV's header and match_id column. Returns its row count."""
-    reader = csv.DictReader(io.StringIO(text))
-    missing = [c for c in REQUIRED_COLUMNS[name] if c not in (reader.fieldnames or [])]
+def read_parquet(keys: list[str], read: Callable[[str], bytes]):
+    """All part files of one partition as one pyarrow Table."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    return pa.concat_tables([pq.read_table(io.BytesIO(read(k))) for k in keys])
+
+
+def check_table(name: str, table, match_id: int) -> int:
+    """Checks one table's columns (and values for match/players). Returns its row count."""
+    missing = [c for c in REQUIRED_COLUMNS[name] if c not in table.column_names]
     if missing:
         raise ContractError(f"{name}: missing columns {missing}")
-    rows, wrong = 0, 0
-    for row in reader:
-        rows += 1
-        if row["match_id"] != str(match_id):
-            wrong += 1
-    if wrong:
-        raise ContractError(f"{name}: {wrong} of {rows} rows have a match_id other than {match_id}")
-    if name in NON_EMPTY and rows == 0:
+    rows = table.num_rows
+    if rows == 0 and name not in MAY_BE_EMPTY:
         raise ContractError(f"{name}: no rows")
+    if name == "match":
+        if rows != 1:
+            raise ContractError(f"match: {rows} rows, expected 1")
+        winner = table.column("game_winner")[0].as_py()
+        if winner not in TEAMS:
+            raise ContractError(f"match: game_winner is {winner}, expected 2 or 3")
+    if name == "players":
+        if rows != 10:
+            raise ContractError(f"players: {rows} players, expected 10")
+        bad = [t for t in table.column("game_team").to_pylist() if t not in TEAMS]
+        if bad:
+            raise ContractError(f"players: game_team values {bad}, expected 2 or 3")
     return rows
 
 
-def check_match_json(text: str, match_id: int) -> None:
-    data = json.loads(text)
-    missing = [f for f in MATCH_FIELDS if f not in data]
-    if missing:
-        raise ContractError(f"match.json: missing fields {missing}")
-    if data["match_id"] != match_id:
-        raise ContractError(f"match.json: match_id is {data['match_id']}, expected {match_id}")
-    if data["winner"] not in TEAMS:
-        raise ContractError(f"match.json: winner is {data['winner']}, expected 2 or 3")
-    players = data["players"]
-    if len(players) != 10:
-        raise ContractError(f"match.json: {len(players)} players, expected 10")
-    for p in players:
-        if any(f not in p for f in PLAYER_FIELDS) or p["team"] not in TEAMS:
-            raise ContractError(f"match.json: bad player entry {p}")
-
-
 def unparsed(replay_keys: list[str], parsed_keys: list[str]) -> list[int]:
-    """Match ids that have a replay but not all four parsed files, newest first. A parse that
-    died halfway left only some files, so it counts as unparsed and runs again."""
+    """Match ids that have a replay but no _complete marker, newest first. A parse that died
+    halfway wrote no marker, so it counts as unparsed and runs again."""
     replays = {int(k.removeprefix("replays/").removesuffix(".dem"))
                for k in replay_keys if k.startswith("replays/") and k.endswith(".dem")}
-    found: dict[int, set[str]] = {}
+    complete = set()
     for key in parsed_keys:
-        parts = key.split("/")
-        if len(parts) == 3 and parts[0] == "parsed" and parts[1].isdigit():
-            found.setdefault(int(parts[1]), set()).add(parts[2])
-    complete = {mid for mid, names in found.items() if set(PARSED_FILES) <= names}
+        m = re.match(rf"parsed/{COMPLETE}/match_id=(\d+)/", key)
+        if m:
+            complete.add(int(m.group(1)))
     return sorted(replays - complete, reverse=True)
 
 
-def check_parsed(match_id: int, read: Callable[[str], bytes]) -> dict[str, int]:
-    """Checks all four parsed files for one match. `read(key)` returns an object's bytes.
-    Returns rows per CSV, for the task log. Raises ContractError on the first problem."""
-    check_match_json(read(parsed_key(match_id, "match.json")).decode(), match_id)
-    return {name: check_csv(name, read(parsed_key(match_id, name)).decode(), match_id)
-            for name in REQUIRED_COLUMNS}
+def check_parsed(match_id: int, read: Callable[[str], bytes],
+                 list_keys: Callable[[str], list[str]]) -> dict[str, int]:
+    """Checks every table of one match. `read(key)` returns an object's bytes, `list_keys(prefix)`
+    the keys under a prefix. Returns rows per table, for the task log. Raises ContractError on
+    the first problem."""
+    if not list_keys(partition_prefix(COMPLETE, match_id)):
+        raise ContractError(f"no {COMPLETE} marker: parse did not finish")
+    counts = {}
+    for name in REQUIRED_COLUMNS:
+        parts = [k for k in list_keys(partition_prefix(name, match_id)) if k.endswith(".parquet")]
+        if not parts:
+            if name in MAY_BE_EMPTY:
+                counts[name] = 0
+                continue
+            raise ContractError(f"{name}: no data for match {match_id}")
+        counts[name] = check_table(name, read_parquet(parts, read), match_id)
+    return counts
