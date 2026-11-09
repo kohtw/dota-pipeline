@@ -4,18 +4,21 @@ pipeline is being built. One machine runs it; files go to Google Drive with rclo
 
 Two routes, run as separate processes:
 
-  steam    Walks Valve's match feed (GetMatchHistoryBySequenceNum, 100 matches per call) forward
-           from a saved cursor, up to 95,000 calls a day. Saves every page, gzipped. Queues
-           completed ranked All Pick matches for the replay route. Matches still in progress
-           when fetched go on a callback list and are fetched again once they have finished.
-  replays  Takes queued matches at least a day old, gets each replay URL from OpenDota
-           (60 calls a minute, 3,000 a day), and downloads replays from Valve as delivered,
-           4 at a time. Downloads slower than 200 KB/s after a minute are retried later.
+  steam    Samples Valve's match feed (GetMatchHistoryBySequenceNum, 100 matches per call)
+           forward from a saved cursor: reads one page, skips the next 3, so it covers every
+           hour of the day and moves faster than real time until it is 3 hours behind live
+           games. Saves every page it reads, gzipped. Queues completed ranked All Pick
+           matches for the replay route. Ranked All Pick matches with no duration yet go on a
+           callback list and are fetched again later.
+  replays  Draws queued matches at random times from the newest day of the queue (matches at
+           least a day old), gets each replay URL from OpenDota (60 calls a minute, 3,000 a
+           day), and downloads replays from Valve as delivered, 8 at a time. Downloads slower
+           than 100 KB/s after a minute, or that cannot connect, are retried 30 minutes later.
 
 State lives in SQLite, so both routes resume where they stopped and never repeat work.
 
 Drive layout (DRIVE_DEST):
-  steam/seq_{start_seq}.json.gz        one Steam page: 100 matches, every mode, unfiltered
+  steam/seq_{start_seq}.json.gz        one Steam page: 100 consecutive matches, every mode, unfiltered
   steam/callback_{match_id}.json.gz    a match fetched again after it finished
   replays/{match_id}.dem.zst           one replay, compressed as Valve serves it
 
@@ -39,6 +42,7 @@ import fcntl
 import gzip
 import logging
 import os
+import random
 import shutil
 import sqlite3
 import subprocess
@@ -74,25 +78,29 @@ HEAD_LAG_S = 3 * 3600  # near the newest matches, wait so most of them have fini
 CALLBACK_AFTER_S = 3600
 CALLBACK_MAX = 3
 STEAM_UPLOAD_EVERY = 100  # pages per rclone batch
+# Read 1 page in 4. One page in sequence covers about 0.5 s of real match time per second, so a
+# stride of 4 moves at about 2x real time, catching up by an hour every hour until HEAD_LAG_S.
+STEAM_STRIDE = 4
 
 MIN_REPLAY_AGE_S = 24 * 3600  # matches under an hour old had no replay salt on OpenDota
 RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
 ERROR_RETRY_S = 600
 MAX_ATTEMPTS = 3
-OPENDOTA_RESERVE = 20
-OPENDOTA_OUTAGE_AFTER = 5  # server errors in a row before a run gives up on OpenDota  # stop with this many daily calls left
+OPENDOTA_RESERVE = 20  # stop with this many daily calls left
+OPENDOTA_OUTAGE_AFTER = 5  # server errors in a row before a run gives up on OpenDota
 # Hard cap on OpenDota calls per UTC day, keyed or not. With a key each call costs about US$0.0001,
 # so 3,000 calls is about US$0.30 a day. Raise it with OPENDOTA_DAILY_CAP in .env.
 OPENDOTA_DAILY_CAP = 3000
 OPENDOTA_USD_PER_CALL = 0.0001
 REPLAY_UPLOAD_EVERY = 20
-DOWNLOAD_WORKERS = 4  # one slow Valve download no longer blocks the rest
-MIN_DOWNLOAD_BPS = 200_000  # give up (and retry later) below this average speed...
+DOWNLOAD_WORKERS = 8  # China-cluster downloads run at about 0.5 MB/s, so a few can be slow at once
+MIN_DOWNLOAD_BPS = 100_000  # give up (and retry later) below this average speed...
 STALL_GRACE_S = 60  # ...once a download has run this long
+DOWNLOAD_RETRY_S = 30 * 60  # after a stall or a failed connection
+SAMPLE_WINDOW_S = 24 * 3600  # replays are drawn from the newest day of the queue
 
 MIN_FREE_GB = 20
-# China-cluster replay servers (replay4xx.dota2.com.cn) time out on connect from here: skip, don't retry
-UNREACHABLE_REPLAY_HOSTS = (".dota2.com.cn",)
+CHINA_REPLAY_HOSTS = (".dota2.com.cn",)  # slower from here, and timed out once; logged separately
 
 log = logging.getLogger("downloader")
 
@@ -209,7 +217,7 @@ class State:
                 match_id      INTEGER PRIMARY KEY,
                 match_seq_num INTEGER,
                 start_time    INTEGER,
-                status        TEXT NOT NULL,  -- discovered|requested|ready|downloading|downloaded|uploaded|no_replay|gone|unreachable|failed
+                status        TEXT NOT NULL,  -- discovered|requested|ready|downloading|downloaded|uploaded|no_replay|gone|failed
                 attempts      INTEGER NOT NULL DEFAULT 0,
                 next_try      REAL NOT NULL DEFAULT 0,
                 replay_url    TEXT,
@@ -227,6 +235,7 @@ class State:
             );
             CREATE TABLE IF NOT EXISTS api_calls (day TEXT, api TEXT, n INTEGER NOT NULL, PRIMARY KEY (day, api));
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS matches_status_start ON matches (status, start_time);
         """)
         self.db.commit()
 
@@ -262,14 +271,38 @@ class State:
         self.db.commit()
         return self.db.total_changes - before
 
-    def due(self, now: float, limit: int) -> list[tuple[int, str, str | None, int]]:
-        """Replay work: ready first, then retries that are due, then new matches old enough to have a salt."""
-        return self.db.execute(
+    def due(self, now: float, limit: int,
+            rng: random.Random | None = None) -> list[tuple[int, str, str | None, int]]:
+        """Replay work: ready and retry rows that are due, then a random sample of new matches."""
+        rows = self.db.execute(
             "SELECT match_id, status, replay_url, attempts FROM matches "
-            "WHERE status = 'ready' OR (status = 'requested' AND next_try <= ?) "
-            "   OR (status = 'discovered' AND start_time <= ?) "
-            "ORDER BY CASE status WHEN 'ready' THEN 0 WHEN 'requested' THEN 1 ELSE 2 END, match_id DESC "
-            "LIMIT ?", (now, now - MIN_REPLAY_AGE_S, limit)).fetchall()
+            "WHERE status IN ('ready', 'requested') AND next_try <= ? "
+            "ORDER BY CASE status WHEN 'ready' THEN 0 ELSE 1 END, match_id DESC LIMIT ?", (now, limit)).fetchall()
+        if len(rows) < limit:
+            rows += self._sample_discovered(now - MIN_REPLAY_AGE_S, limit - len(rows), rng or random.Random())
+        return rows
+
+    def _sample_discovered(self, cutoff: float, n: int, rng: random.Random) -> list[tuple[int, str, str | None, int]]:
+        # Uniform over start time, not over matches, so quiet hours are as well covered as busy ones.
+        newest = self.db.execute("SELECT MAX(start_time) FROM matches WHERE status = 'discovered' "
+                                 "AND start_time <= ?", (cutoff,)).fetchone()[0]
+        if newest is None:
+            return []
+        picks: dict[int, tuple[int, str, str | None, int]] = {}
+        for _ in range(n * 3):
+            if len(picks) == n:
+                break
+            row = self.db.execute(
+                "SELECT match_id, status, replay_url, attempts FROM matches WHERE status = 'discovered' "
+                "AND start_time >= ? AND start_time <= ? ORDER BY start_time LIMIT 1",
+                (rng.uniform(newest - SAMPLE_WINDOW_S, newest), cutoff)).fetchone()
+            picks[row[0]] = row
+        return list(picks.values())
+
+    def waiting(self, now: float) -> int:
+        return self.db.execute(
+            "SELECT COUNT(*) FROM matches WHERE status IN ('ready', 'requested') "
+            "OR (status = 'discovered' AND start_time <= ?)", (now - MIN_REPLAY_AGE_S,)).fetchone()[0]
 
     def update(self, match_id: int, **fields) -> None:
         fields["updated"] = time.time()
@@ -530,7 +563,8 @@ def run_steam(cfg: Config, max_minutes: float, days_back: float,
             stored += save_gz(staging, f"seq_{cursor}.json.gz", raw)
             q, w = take_page(state, matches, time.time())
             queued, waiting, pages, since_upload = queued + q, waiting + w, pages + 1, since_upload + 1
-            cursor = matches[-1]["match_seq_num"] + 1
+            first, last = matches[0]["match_seq_num"], matches[-1]["match_seq_num"]
+            cursor = last + 1 + (STEAM_STRIDE - 1) * (last - first + 1)  # skip the next pages
             state.set_meta("steam_cursor", str(cursor))
             if pages % 50 == 1:
                 age_h = (time.time() - matches[0]["start_time"]) / 3600
@@ -590,7 +624,7 @@ def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -
     """Gets a match's replay URL, or schedules a retry. Returns the URL when it is ready to download."""
     match_id, status, url, attempts = row
     if status == "ready":
-        return None if url is None or _skip_unreachable(state, match_id, url) else url
+        return url
     try:
         url = od.replay_url(match_id)
         if not url:
@@ -611,20 +645,16 @@ def resolve(state: State, od: OpenDota, row: tuple[int, str, str | None, int]) -
                      next_try=time.time() + ERROR_RETRY_S, error=str(e)[:300])
         log.warning("resolve %s failed: %s", match_id, e)
         return None
-    if _skip_unreachable(state, match_id, url):
-        return None
     state.update(match_id, status="ready", replay_url=url)
     return url
 
 
-def _skip_unreachable(state: State, match_id: int, url: str) -> bool:
-    if (urlparse(url).hostname or "").endswith(UNREACHABLE_REPLAY_HOSTS):
-        state.update(match_id, status="unreachable", replay_url=url, error="replay host times out from here")
-        return True
-    return False
+def is_china_host(url: str) -> bool:
+    return (urlparse(url).hostname or "").endswith(CHINA_REPLAY_HOSTS)
 
 
-def record_download(state: State, match_id: int, attempts: int, outcome: tuple[Path, int] | Exception) -> int:
+def record_download(state: State, match_id: int, attempts: int, outcome: tuple[Path, int] | Exception,
+                    tag: str = "") -> int:
     """Stores a download's result. Returns bytes downloaded (0 if none)."""
     if isinstance(outcome, ReplayGone):
         state.update(match_id, status="gone", error=str(outcome))
@@ -632,8 +662,8 @@ def record_download(state: State, match_id: int, attempts: int, outcome: tuple[P
     if isinstance(outcome, Exception):
         failed = attempts + 1 >= MAX_ATTEMPTS
         state.update(match_id, status="failed" if failed else "ready", attempts=attempts + 1,
-                     error=str(outcome)[:300])
-        log.warning("download %s failed: %s", match_id, outcome)
+                     next_try=time.time() + DOWNLOAD_RETRY_S, error=str(outcome)[:300])
+        log.warning("download %s%s failed: %s", match_id, tag, outcome)
         return 0
     path, size = outcome
     state.update(match_id, status="downloaded", file=str(path), bytes=size, error=None)
@@ -671,15 +701,14 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
     state.db.execute("UPDATE matches SET status = 'ready' WHERE status = 'downloading'")  # left by a crash
     state.db.commit()
     od = OpenDota(requests.Session(), cfg.opendota_key, state=state, daily_cap=cfg.opendota_daily_cap)
-    log.info("replay run started; %d matches waiting, %d download workers",
-             len(state.due(time.time(), 1_000_000)), workers)
+    log.info("replay run started; %d matches waiting, %d download workers", state.waiting(time.time()), workers)
     if cfg.opendota_key:
         log.info("OpenDota key set: calls are billed; cap %d a day (about US$%.2f)",
                  cfg.opendota_daily_cap, cfg.opendota_daily_cap * OPENDOTA_USD_PER_CALL)
     staging = cfg.staging / "replays"
     dest = f"{cfg.drive_dest}/replays"
     replays = total_bytes = since_upload = 0
-    inflight: dict[Future, tuple[int, int]] = {}
+    inflight: dict[Future, tuple[int, int, str]] = {}
 
     def collect(block: bool) -> None:
         nonlocal replays, total_bytes, since_upload
@@ -687,12 +716,13 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
             return
         done, _ = wait(inflight, timeout=None if block else 0, return_when=FIRST_COMPLETED)
         for future in done:
-            match_id, attempts = inflight.pop(future)
-            size = record_download(state, match_id, attempts, future.result())
+            match_id, attempts, url = inflight.pop(future)
+            china = " [china]" if is_china_host(url) else ""
+            size = record_download(state, match_id, attempts, future.result(), tag=china)
             if size:
                 replays, total_bytes, since_upload = replays + 1, total_bytes + size, since_upload + 1
-                log.info("replay %d: %.1f MB (%d this run, %.2f GB, %d OpenDota calls today)",
-                         match_id, size / 1e6, replays, total_bytes / 1e9, state.calls_today("opendota"))
+                log.info("replay %d%s: %.1f MB (%d this run, %.2f GB, %d OpenDota calls today)",
+                         match_id, china, size / 1e6, replays, total_bytes / 1e9, state.calls_today("opendota"))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         try:
@@ -716,7 +746,7 @@ def run_replays(cfg: Config, max_minutes: float, sleep: Callable[[float], None] 
                     url = resolve(state, od, row)
                     if url:
                         state.update(row[0], status="downloading")
-                        inflight[pool.submit(download_job, url, staging, row[0])] = (row[0], row[3])
+                        inflight[pool.submit(download_job, url, staging, row[0])] = (row[0], row[3], url)
         except BudgetExhausted as e:
             log.info("stopping: %s", e)
         finally:
@@ -770,6 +800,9 @@ def status(cfg: Config) -> None:
     print("Replay queue:")
     for name, n in sorted(state.counts("matches").items()):
         print(f"  {name:<11} {n}")
+    china = dict(state.db.execute("SELECT status, COUNT(*) FROM matches WHERE replay_url LIKE '%.dota2.com.cn/%' "
+                                  "GROUP BY status").fetchall())
+    print("China-host replays:", china or "none")
     total = state.db.execute("SELECT COALESCE(SUM(bytes), 0) FROM matches").fetchone()[0]
     print(f"Replays downloaded: {total / 1e9:.1f} GB")
 

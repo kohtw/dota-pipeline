@@ -164,14 +164,44 @@ def test_steam_backoff_never_runs_past_the_deadline():
     assert len(session.calls) == 1
 
 
-def test_china_replay_hosts_are_skipped_without_downloading(state: rd.State):
-    session = FakeSession({("GET", rd.OPENDOTA_API): [
-        FakeResponse(json_data={"replay_url": "http://replay415.dota2.com.cn/570/1_9.dem.bz2"})]})
+def test_china_replay_hosts_are_downloaded_like_any_other(state: rd.State):
+    url = "http://replay415.dota2.com.cn/570/1_9.dem.bz2"
+    session = FakeSession({("GET", rd.OPENDOTA_API): [FakeResponse(json_data={"replay_url": url})]})
     od = rd.OpenDota(session, None, pace=no_pace())
-    assert rd.resolve(state, od, (1, "discovered", None, 0)) is None
-    assert rd.resolve(state, od, (2, "ready", "http://replay413.dota2.com.cn/570/2_9.dem.bz2", 1)) is None
-    assert state.counts("matches")["unreachable"] == 2
+    assert rd.resolve(state, od, (1, "discovered", None, 0)) == url
+    assert rd.resolve(state, od, (2, "ready", url, 1)) == url
     assert len(session.calls) == 1  # the ready one needed no OpenDota call
+    assert rd.is_china_host(url) and not rd.is_china_host("http://replay185.valve.net/570/1_9.dem.bz2")
+
+
+def test_failed_connection_retries_the_download_later(state: rd.State):
+    state.update(1, status="downloading", replay_url="http://replay413.dota2.com.cn/570/1_9.dem.bz2")
+    rd.record_download(state, 1, 0, requests.ConnectTimeout("timed out"))
+    now = time.time()
+    assert state.db.execute("SELECT status, attempts FROM matches WHERE match_id = 1").fetchone() == ("ready", 1)
+    assert 1 not in [row[0] for row in state.due(now, 10)]
+    assert [row[0] for row in state.due(now + rd.DOWNLOAD_RETRY_S + 1, 10)][0] == 1
+
+
+def test_replay_sample_spreads_over_the_newest_day(tmp_path: Path):
+    state = rd.State(tmp_path / "state.db")
+    hour = 3600
+    # a busy hour (100 matches) and a quiet one (1 match) in the newest day, and a match 3 days older
+    busy = [match(match_id=100 + i, start_time=10 * hour + i) for i in range(100)]
+    quiet = [match(match_id=1, start_time=20 * hour)]
+    state.add_discovered(busy + quiet + [match(match_id=2, start_time=-50 * hour)])
+    now = 20 * hour + rd.MIN_REPLAY_AGE_S
+    rng = rd.random.Random(0)
+    picks = [row[0] for _ in range(200) for row in state.due(now, 1, rng)]
+    assert 2 not in picks  # older than the newest day
+    assert 0.3 < picks.count(1) / len(picks) < 0.7  # the quiet hour is drawn as often as the busy one
+
+
+def test_replay_sample_moves_back_once_the_newest_day_is_done(tmp_path: Path):
+    state = rd.State(tmp_path / "state.db")
+    state.add_discovered([match(match_id=1, start_time=0), match(match_id=2, start_time=-3 * 86400)])
+    state.update(1, status="uploaded")
+    assert state.due(rd.MIN_REPLAY_AGE_S, 10) == [(2, "discovered", None, 0)]
 
 
 def test_steam_speeds_up_after_a_run_of_successes():
@@ -259,7 +289,8 @@ def test_steam_run_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     rd.run_steam(cfg, max_minutes=0.005, days_back=7, sleep=lambda s: None)
 
     state = rd.State(cfg.db)
-    assert state.get_meta("steam_cursor") == "102"  # stopped before the page of live games
+    # the page of seq 100-101 skips the next 3 pages' worth (6 seq numbers); then it stops at live games
+    assert state.get_meta("steam_cursor") == "108"
     saved = sorted(p.name for p in (tmp_path / "staging" / "steam").iterdir())
     assert saved == [f"seq_{newest - 1_000_000}.json.gz", f"seq_{newest - 500_000}.json.gz"]  # probe, then start
     assert state.counts("matches") == {"discovered": 1}
