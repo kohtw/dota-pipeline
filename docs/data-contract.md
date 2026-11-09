@@ -24,10 +24,13 @@ S3-compatible store (Garage, in docker compose). Endpoint `http://garage:3900` i
 raw/                                                      bucket
   replays/{match_id}.dem                                  decompressed replay
   parsed/{table}/match_id={match_id}/part-*.parquet       one dataset per table below
+  parsed/_complete/match_id={match_id}/part-*.parquet     marker: match_id, parsed_at (timestamp)
 clean/{table}/match_id={match_id}/part-*.parquet          (Spark clean jobs, TBD)
 ```
 
 Writes are idempotent per match: re-parsing a match replaces only its `match_id=` partition in each table.
+
+`_complete` is written after every table, so a match is fully parsed only once its `_complete` partition exists. Downstream should read a match only then. A table with no rows for a match (e.g. `wards` when no ward was placed) has no partition for it. `dags/dota/contract.py` checks parsed output against this file.
 
 ## Tables
 

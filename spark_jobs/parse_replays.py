@@ -5,6 +5,7 @@ The replay reading itself runs in the JVM (ReplayExtractor, Clarity) on the exec
 passes the spec, gets back one DataFrame per table, and writes them.
 
 Output: <out>/<table>/match_id=<id>/part-*.parquet. Re-running a match overwrites only that match.
+After all tables, <out>/_complete/match_id=<id>/ marks each match as fully written.
 
 Paths can be local or s3a:// (Garage). For s3a, set env S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY.
 Jars: env EXTRACTOR_JARS (set in the dota-parser image), else parser/build/extractor + parser/build/s3a.
@@ -20,6 +21,7 @@ import os
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 from replay_spec import SPEC
 
@@ -58,8 +60,12 @@ def main():
     args = ap.parse_args()
 
     spark = spark_session()
-    for name, df in parse(spark, args.replays).items():
+    tables = parse(spark, args.replays)
+    for name, df in tables.items():
         df.write.mode("overwrite").partitionBy("match_id").parquet(f"{args.out}/{name}")
+    # written last: a match with a _complete partition has every table written (a crash leaves none)
+    (tables["match"].select("match_id").withColumn("parsed_at", F.current_timestamp())
+     .write.mode("overwrite").partitionBy("match_id").parquet(f"{args.out}/_complete"))
     spark.stop()
 
 
