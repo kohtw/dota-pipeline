@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 from airflow.sdk import Variable, dag, task
 
+from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
+
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
 N_MATCHES = 50
 BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
@@ -22,6 +24,7 @@ BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
     catchup=False,
     max_active_runs=1,
+    default_args=ALERT_CALLBACKS,
 )
 def dota_daily_download():
     @task
