@@ -1,54 +1,76 @@
 # Data contract: raw layer
 
-What the parser produces and where it lands in the data lake. Ingestion, Postgres/dbt and the frontend build against this. Change it by PR, and tell everyone downstream.
+What the parser produces and where it lands in the data lake. Spark clean jobs, Postgres/dbt and the frontend build against this. Change it by PR, and tell everyone downstream.
+
+Tables and columns are defined in [`spark_jobs/replay_spec.py`](../spark_jobs/replay_spec.py). This file documents them; keep the two in sync.
 
 ## Conventions
 
-- **Key:** every row and file carries `match_id` (int64, the Dota match ID).
-- **Time:** `tick` (int) is the time key in all raw files. It is the replay's own counter at 30 ticks per second, starting at replay start rather than at the 0:00 game clock.
-  - In-game clock (done in clean, not raw): `game_time_s = (tick - game_start_tick) / 30`. `game_start_tick` comes from `match.json`. Pre-game is negative.
-- **Heroes:** always the `npc_dota_hero_*` name (e.g. `npc_dota_hero_ember_spirit`). This is the same form as in the combat log, so files join on it.
+- **Key:** every row carries `match_id` (int64, the Dota match ID). Datasets are partitioned by it.
+- **Time:** `tick` (int) is the time key in all raw tables. It is the replay's own counter at 30 ticks per second, starting at replay start rather than at the 0:00 game clock.
+  - In-game clock (done in clean, not raw): `game_time_s = (tick - game_start_tick) / 30`. `game_start_tick` is derived in clean from `gamerules` (first row with `m_pGameRules.m_nGameState` = 5). Pre-game is negative.
 - **Teams:** `2` = Radiant, `3` = Dire.
-- **CSV:** UTF-8, comma-separated, header row, RFC 4180 quoting. An empty cell means null.
-- **Load CSVs by header name, never by column position.** Columns may be added. They are never renamed or removed without a contract change.
-- **Raw is faithful:** raw holds source values only. Converting, renaming, splitting by type and deduplicating all happen in clean.
+- **Raw is unresolved:** the parser writes source values only. Columns are named after the replay property they hold. Names are indexes into a string table (`names`, `entity_names`), entities are referenced by handle, positions are grid cell + offset, player IDs are the replay's own (`m_iPlayerID` = 2 × slot). Illusions are not removed. Resolving, filtering, diffing and coordinate math all happen in clean.
+- **Null handle:** `16777215` means "no entity" in any handle column.
+- **Sampling:** `snapshot` tables (`gamerules`, `heroes`, `player_resource`, `team_data`) are sampled every 30 ticks (1 s). Event tables (`combatlog`, `wards`, `item_entities`) have exact ticks.
+- **Parquet:** typed columns (int32, int64, float32, boolean, string); null = value absent. Column names may contain dots (e.g. `CBodyComponent.m_cellX`); quote them in Spark SQL with backticks.
+- **Read columns by name, never by position.** Columns may be added. They are never renamed or removed without a contract change.
 
 ## Object store layout
 
-S3-compatible store (Garage, in docker compose). Endpoint `http://garage:3900` inside compose, or `http://localhost:3900` from the host. Region `us-east-1`, path-style addressing. Credentials are in `docker-compose.yml` (dev only).
+S3-compatible store (Garage, in docker compose). Endpoint `http://garage:3900` inside compose, or `http://localhost:3900` from the host. Region `us-east-1`, path-style addressing. Credentials are in `docker-compose.yml` (dev only). Spark reads and writes it as `s3a://`.
 
 ```
-raw/                                    bucket
-  replays/{match_id}.dem                decompressed replay
-  parsed/{match_id}/match.json          match summary
-  parsed/{match_id}/combatlog.csv       every combat log entry
-  parsed/{match_id}/positions.csv       hero positions, 1 Hz
-  parsed/{match_id}/names.csv           CombatLogNames lookup table
-clean/{table}/match_id={match_id}/part.parquet    (owned by ingestion, TBD)
+raw/                                                      bucket
+  replays/{match_id}.dem                                  decompressed replay
+  parsed/{table}/match_id={match_id}/part-*.parquet       one dataset per table below
+clean/{table}/match_id={match_id}/part-*.parquet          (Spark clean jobs, TBD)
 ```
 
-Writes are idempotent per match: re-running a match overwrites the same keys.
+Writes are idempotent per match: re-parsing a match replaces only its `match_id=` partition in each table.
 
-## Files
+## Tables
 
-### `match.json`
+| Table | Kind | Rows |
+|---|---|---|
+| `match` | file header | 1 per match |
+| `players` | file header | 1 per player |
+| `combatlog` | events | every combat log entry |
+| `names` | string table | `CombatLogNames` |
+| `entity_names` | string table | `EntityNames` |
+| `gamerules` | snapshot, 1 Hz | game state |
+| `heroes` | snapshot, 1 Hz | every hero entity (illusions included): position + item handles |
+| `player_resource` | snapshot, 1 Hz | per player: team, hero, level, K/D/A |
+| `team_data` | snapshot, 1 Hz | per player: gold, XP, last hits, damage, wards, ... |
+| `wards` | entity created / deleted | observer and sentry wards |
+| `item_entities` | entity created / deleted | every item entity, with its name index |
 
-| Field | Type | Notes |
+Columns common to the kinds:
+- snapshot: `match_id`, `tick` (multiple of 30), `handle` (entity handle), `class` (entity class), then the properties.
+- snapshot over an array: same plus `index` (array position). Unused array entries (all properties null) are not written.
+- created / deleted: `match_id`, `tick` (exact), `event` (`created` / `deleted`), `handle` (pairs the two rows), `class`, then the properties. Entities still alive at replay end have no `deleted` row.
+
+### `match`
+
+| Column | Type | Notes |
 |---|---|---|
 | `match_id` | int64 | |
 | `game_mode` | int | Dota game mode ID |
-| `winner` | int | `2` Radiant, `3` Dire |
+| `game_winner` | int | `2` Radiant, `3` Dire |
 | `end_time` | int64 | Unix seconds |
-| `game_start_tick` | int | Tick of the horn (0:00); gamerules state 5 (GAME_IN_PROGRESS) |
-| `game_start_time` | float | Same moment on the combat log `timestamp` clock (seconds) |
-| `players[]` | array | One per player, ordered by slot |
-| `players[].slot` | int | 0–4 Radiant, 5–9 Dire |
-| `players[].hero` | string | `npc_dota_hero_*` |
-| `players[].team` | int | `2` / `3` |
 
-### `combatlog.csv`
+### `players`
 
-One row per combat log entry. This is a wide, sparse file: every field Clarity's `CombatLogEntry` exposes is a column, and a cell is empty when that entry does not carry the field. The meaning of some columns depends on `type` (e.g. `value` is damage for DAMAGE, gold for GOLD, and an item name index for PURCHASE).
+| Column | Type | Notes |
+|---|---|---|
+| `match_id` | int64 | |
+| `slot` | int | Position in the replay file's player list (0–4 Radiant, 5–9 Dire) |
+| `hero_name` | string | `npc_dota_hero_*` |
+| `game_team` | int | `2` / `3` |
+
+### `combatlog`
+
+One row per combat log entry. Wide and sparse: every field Clarity's `CombatLogEntry` exposes is a column, null when that entry does not carry the field. The meaning of some columns depends on `type` (e.g. `value` is damage for DAMAGE, gold for GOLD, and a `names` index for PURCHASE).
 
 Core columns, always first:
 
@@ -58,36 +80,88 @@ Core columns, always first:
 | `tick` | int | Tick at which the entry was delivered |
 | `type` | string | e.g. `DOTA_COMBATLOG_DAMAGE`, `_GOLD`, `_PURCHASE`, `_DEATH`, `_MODIFIER_ADD`, `_GAME_STATE` |
 | `timestamp` | float | Combat log's own clock (seconds). Use `tick` for joins |
-| `attacker_name` | string | `npc_*` / `dota_*` name |
-| `target_name` | string | |
-| `inflictor_name` | string | Ability, item or modifier |
+| `attacker_name_idx` | int | Index into `names` |
+| `target_name_idx` | int | Index into `names` |
+| `inflictor_name_idx` | int | Index into `names` (ability, item or modifier) |
 | `value` | int | Meaning depends on `type` |
-| `value_name` | string | `value` resolved through the names table (e.g. PURCHASE → `item_*`), else empty |
 
-The remaining ~72 columns follow alphabetically, in snake_case of the Clarity field (e.g. `gold_reason`, `xp_reason`, `health`, `location_x`, `location_y`, `attacker_team`, `target_team`, `attacker_hero`, `target_illusion`, `stun_duration`, `networth`). Booleans are `true`/`false`. `assist_players` is a `;`-separated list of player IDs.
+The remaining ~72 columns follow alphabetically, in snake_case of the Clarity field (e.g. `gold_reason`, `xp_reason`, `health`, `location_x`, `location_y`, `attacker_team`, `target_team`, `attacker_hero`, `target_illusion`, `stun_duration`, `networth`). The other name fields are also indexes (`damage_source_name_idx`, `target_source_name_idx`). `assist_players` is a `;`-separated string of player IDs.
 
-### `positions.csv`
-
-One row per real hero (illusions excluded) every 30 ticks (1 s).
+### `names` / `entity_names`
 
 | Column | Type | Notes |
 |---|---|---|
 | `match_id` | int64 | |
-| `tick` | int | Multiple of 30 |
-| `hero` | string | `npc_dota_hero_*` |
-| `team` | int | `2` / `3` |
-| `x` | float | World units, about −8000 to 8000 |
-| `y` | float | World units |
+| `idx` | int | `names`: what combatlog `*_name_idx` (and PURCHASE `value`) hold. `entity_names`: what `item_entities.m_pEntity.m_nameStringTableIndex` holds |
+| `name` | string | e.g. `npc_dota_hero_*`, `item_*` |
 
-### `names.csv`
+### `gamerules`
 
-The replay's `CombatLogNames` string table.
+Snapshot of `CDOTAGamerulesProxy`.
 
 | Column | Type | Notes |
 |---|---|---|
-| `match_id` | int64 | |
-| `idx` | int | Index referenced by the combat log (e.g. PURCHASE `value`). Name columns in `combatlog.csv` are already resolved |
-| `name` | string | |
+| `m_pGameRules.m_nGameState` | int | `5` = game in progress (horn) |
+| `m_pGameRules.m_flPreGameStartTime` | float | Combat log `timestamp` clock; `0.0` until set |
+| `m_pGameRules.m_flGameStartTime` | float | Horn on the combat log `timestamp` clock; `0.0` until set |
+| `m_pGameRules.m_flGameEndTime` | float | `0.0` until set |
+| `m_pGameRules.m_bGamePaused` | bool | |
+
+### `heroes`
+
+Snapshot of every `CDOTA_Unit_Hero_*` entity, illusions included.
+
+| Column | Type | Notes |
+|---|---|---|
+| `m_iPlayerID` | int | 2 × slot |
+| `m_iTeamNum` | int | `2` / `3` |
+| `m_hReplicatingOtherHeroModel` | int | Null handle on real heroes; illusions hold another hero's handle |
+| `CBodyComponent.m_cellX`, `CBodyComponent.m_cellY` | int | Grid cell |
+| `CBodyComponent.m_vecX`, `CBodyComponent.m_vecY` | float | Offset in cell. World x = `cellX * 128 + vecX - 16384` (same for y) |
+| `m_hItems.0000` … `m_hItems.0016` | int | Item entity handle per slot: 0–5 inventory, 6–8 backpack, 9–14 stash, 15 teleport, 16 neutral. Join `item_entities.handle` for the item |
+
+### `player_resource`
+
+Snapshot of `CDOTA_PlayerResource`, over the player arrays (`index` = player array position).
+
+| Column | Type | Notes |
+|---|---|---|
+| `index` | int | Player array position |
+| `m_vecPlayerData.m_iPlayerTeam` | int | `2` / `3` |
+| `m_vecPlayerTeamData.m_iTeamSlot` | int | 0–4 within the team |
+| `m_vecPlayerTeamData.m_nSelectedHeroID` | int | Valve numeric hero ID |
+| `m_vecPlayerTeamData.m_iLevel`, `.m_iKills`, `.m_iDeaths`, `.m_iAssists` | int | |
+
+### `team_data`
+
+Snapshot of `CDOTA_DataRadiant` / `CDOTA_DataDire` over `m_vecDataTeam`. `class` gives the team; `index` = team slot 0–4. Join to `player_resource` on team + `index` = `m_vecPlayerTeamData.m_iTeamSlot`.
+
+| Column | Type |
+|---|---|
+| `m_vecDataTeam.m_iNetWorth`, `.m_iReliableGold`, `.m_iUnreliableGold`, `.m_iTotalEarnedGold`, `.m_iTotalEarnedXP` | int |
+| `m_vecDataTeam.m_iLastHitCount`, `.m_iDenyCount` | int |
+| `m_vecDataTeam.m_flHeroDamage`, `.m_flTowerDamage`, `.m_fHealing`, `.m_fStuns` | float |
+| `m_vecDataTeam.m_iObserverWardsPlaced`, `.m_iSentryWardsPlaced`, `.m_iCampsStacked`, `.m_iRunePickups`, `.m_iTowerKills`, `.m_iRoshanKills` | int |
+
+### `wards`
+
+Created / deleted of `CDOTA_NPC_Observer_Ward*`. `class` `CDOTA_NPC_Observer_Ward` = observer, `CDOTA_NPC_Observer_Ward_TrueSight` = sentry.
+
+| Column | Type | Notes |
+|---|---|---|
+| `m_nPlayerOwnerID` | int | 2 × slot |
+| `m_iTeamNum` | int | `2` / `3` |
+| `CBodyComponent.m_cellX`, `.m_cellY`, `.m_vecX`, `.m_vecY` | int / float | As in `heroes` |
+
+### `item_entities`
+
+Created / deleted of every `CDOTA_Item*` entity (`class` e.g. `CDOTA_Item_TeleportScroll`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `m_pEntity.m_nameStringTableIndex` | int | Index into `entity_names` (e.g. `item_tpscroll`) |
+
+Hero inventory at tick T: `heroes` row at T → each `m_hItems.*` handle → `item_entities.handle` → `entity_names.idx`.
 
 ## Ownership
 

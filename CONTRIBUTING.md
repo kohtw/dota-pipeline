@@ -7,14 +7,17 @@ How this repo is laid out, how to run it, and the few rules that keep it easy to
 ```
 dags/                      Airflow DAGs: orchestration only (schedule, retries, task wiring)
   dota_daily_download.py   daily 00:00 SGT: ranked All Pick replays -> Garage
-  replay_parse.py          parse one replay in Garage -> parsed CSV/JSON in Garage
+  replay_parse.py          parse one replay in Garage -> parsed Parquet tables in Garage
   dota/                    the actual logic, plain Python, no Airflow
     config.py              constants only (cheap to import)
     steam.py               Valve Steam Web API
     opendota.py            OpenDota (replay download URL)
     storage.py             Garage / S3
-parser/                    Java replay parser (Clarity), runs as the dota-parser container
-docs/data-contract.md      what lands in Garage, file by file and column by column
+spark_jobs/                PySpark jobs
+  replay_spec.py           which raw tables/columns to extract from a replay (edit this, not Java)
+  parse_replays.py         replays -> one Parquet dataset per table
+parser/                    Java replay extractor (Clarity), called by parse_replays.py; Dockerfile = dota-parser image
+docs/data-contract.md      what lands in Garage, table by table and column by column
 scripts/                   one-off / manual tools (ingest, clean)
 airflow/, garage/          Docker images for the local stack
 ```
@@ -28,7 +31,7 @@ airflow/, garage/          Docker images for the local stack
    `.env` is gitignored. Never commit it.
 2. Build the parser image, then start everything:
    ```
-   docker build -t dota-parser parser
+   docker build -t dota-parser -f parser/Dockerfile .
    docker compose up -d --build
    ```
 3. Open:
@@ -36,6 +39,14 @@ airflow/, garage/          Docker images for the local stack
    - Garage (file browser): http://localhost:3909
 
 To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match_id": 1234567890}`. Its replay must already be in Garage (`raw/replays/{match_id}.dem`).
+
+To parse replays on your machine without Airflow (Spark needs Linux, so use the image; rebuild it after changing `parser/` or `spark_jobs/`):
+```
+docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/output:/out" dota-parser "/data/*.dem" /out/parsed
+```
+Output: `output/parsed/{table}/match_id={id}/*.parquet`.
+
+To add or change a raw column or table, edit `spark_jobs/replay_spec.py` and update `docs/data-contract.md` in the same PR.
 
 Don't trigger `dota_daily_download` by hand. Each run saves a bookmark that the next run starts from (see the file's docstring), so a manual run shifts the next day's window.
 

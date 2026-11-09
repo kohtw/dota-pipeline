@@ -1,0 +1,8 @@
+# build context is the repo root; only parser/ and spark_jobs/ are needed
+*
+!parser/
+!spark_jobs/
+parser/build/
+parser/bin/
+parser/.gradle/
+spark_jobs/__pycache__/

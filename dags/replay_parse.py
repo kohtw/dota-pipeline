@@ -1,7 +1,7 @@
 """
-Parse one replay straight from Garage: the dota-parser container reads
-s3://raw/replays/{match_id}.dem and uploads match.json, combatlog.csv,
-positions.csv, names.csv to s3://raw/parsed/{match_id}/ (docs/data-contract.md).
+Parse one replay straight from Garage: the dota-parser container (PySpark, local mode) reads
+s3a://raw/replays/{match_id}.dem and writes one Parquet dataset per table to
+s3a://raw/parsed/{table}/match_id={match_id}/ (docs/data-contract.md).
 """
 
 import os
@@ -25,7 +25,7 @@ def replay_parse():
     DockerOperator(
         task_id="parse_replay",
         image="dota-parser",
-        command=[f"s3://{BUCKET}/replays/{MATCH}.dem", f"s3://{BUCKET}/parsed/{MATCH}/"],
+        command=[f"s3a://{BUCKET}/replays/{MATCH}.dem", f"s3a://{BUCKET}/parsed"],
         docker_url="tcp://docker-proxy:2375",
         network_mode="dota-pipeline_default",  # so the parser can reach garage:3900
         private_environment={k: os.environ.get(k, "") for k in S3_ENV_VARS},  # hidden in the UI
