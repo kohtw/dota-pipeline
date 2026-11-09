@@ -2,3 +2,4 @@
 
 BUCKET = "raw"  # Garage raw bucket
 S3_ENV_VARS = ("S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY")
+DOCKER_NETWORK = "dota-pipeline_default"  # compose network, so parser containers can reach garage:3900

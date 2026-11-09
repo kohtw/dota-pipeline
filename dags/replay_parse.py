@@ -10,6 +10,7 @@ from datetime import datetime
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import Param, dag
 
+from dota.alerts import ALERT_CALLBACKS
 from dota.config import BUCKET, S3_ENV_VARS
 
 MATCH = "{{ params.match_id }}"
@@ -20,6 +21,7 @@ MATCH = "{{ params.match_id }}"
     start_date=datetime(2026, 1, 1),
     catchup=False,
     params={"match_id": Param(type="integer")},  # required
+    default_args=ALERT_CALLBACKS,
 )
 def replay_parse():
     DockerOperator(
