@@ -87,6 +87,9 @@ RETRY_AFTER_S = 2 * 3600  # wait after asking OpenDota to fetch a salt
 ERROR_RETRY_S = 600
 MAX_ATTEMPTS = 3
 OPENDOTA_RESERVE = 20  # stop with this many daily calls left
+# When the free tier says the day is spent, check again this often. Its reset time isn't documented:
+# it came at 00:00 UTC on 2026-11-08 and 2026-11-09, but not by 03:23 UTC on 2026-11-10.
+OPENDOTA_RECHECK_S = 3600
 OPENDOTA_OUTAGE_AFTER = 5  # server errors in a row before a run gives up on OpenDota
 # Hard cap on OpenDota calls per UTC day, keyed or not. With a key each call costs about US$0.0001,
 # so 3,000 calls is about US$0.30 a day. Raise it with OPENDOTA_DAILY_CAP in .env.
@@ -415,8 +418,9 @@ class OpenDota:
 
     def __init__(self, session: requests.Session, key: str | None, reserve: int = OPENDOTA_RESERVE,
                  pace: Paced | None = None, sleep: Callable[[float], None] = time.sleep,
-                 state: State | None = None, daily_cap: int = OPENDOTA_DAILY_CAP):
-        self.session, self.key, self.reserve, self.sleep = session, key, reserve, sleep
+                 state: State | None = None, daily_cap: int = OPENDOTA_DAILY_CAP,
+                 clock: Callable[[], float] = time.time):
+        self.session, self.key, self.reserve, self.sleep, self.clock = session, key, reserve, sleep, clock
         self.state, self.daily_cap = state, daily_cap
         self.pace = pace or Paced(1.05)  # free tier: 60 calls a minute
         self.calls = 0
@@ -427,8 +431,10 @@ class OpenDota:
         for attempt in range(2):
             if self.remaining_day is not None and self.remaining_day <= self.reserve:
                 raise BudgetExhausted(f"OpenDota daily calls left: {self.remaining_day}")
-            if self.state and self.state.get_meta("opendota_spent_day") == utc_day():
-                raise BudgetExhausted("OpenDota free-tier calls already used up today (UTC)")
+            recheck = float(self.state.get_meta("opendota_recheck_at") or 0) if self.state else 0
+            if recheck > self.clock():
+                raise BudgetExhausted("OpenDota free-tier calls used up; checking again at "
+                                      + time.strftime("%H:%M", time.localtime(recheck)))
             if self.state and self.state.calls_today("opendota") >= self.daily_cap:
                 raise BudgetExhausted(f"OpenDota daily cap of {self.daily_cap} calls reached")
             self.pace.wait()
@@ -449,8 +455,8 @@ class OpenDota:
             if day is not None:
                 self.remaining_day = int(day)
                 if self.state and self.remaining_day <= self.reserve:
-                    # later runs today skip OpenDota without spending a call to find out
-                    self.state.set_meta("opendota_spent_day", utc_day())
+                    # later runs skip OpenDota until then, without spending a call to find out
+                    self.state.set_meta("opendota_recheck_at", str(self.clock() + OPENDOTA_RECHECK_S))
             if r.status_code != 429:
                 return r
             if self.remaining_day == 0 or attempt == 1:

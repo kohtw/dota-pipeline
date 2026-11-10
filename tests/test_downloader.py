@@ -317,13 +317,20 @@ def test_opendota_stops_at_daily_reserve():
     assert len(session.calls) == 1
 
 
-def test_opendota_remembers_a_spent_day_across_runs(state: rd.State):
+def test_opendota_spent_allowance_is_checked_again_an_hour_later(state: rd.State):
     session = FakeSession({("GET", rd.OPENDOTA_API): [
-        FakeResponse(json_data={"replay_url": "u"}, headers={"x-rate-limit-remaining-day": "20"})]})
-    rd.OpenDota(session, None, reserve=20, pace=no_pace(), state=state).replay_url(1)
+        FakeResponse(json_data={"replay_url": "u"}, headers={"x-rate-limit-remaining-day": "20"}),
+        FakeResponse(json_data={"replay_url": "u"}, headers={"x-rate-limit-remaining-day": "2999"})]})
+
+    def run(at: float) -> rd.OpenDota:  # each run is a fresh client, as in the hourly jobs
+        return rd.OpenDota(session, None, reserve=20, pace=no_pace(), state=state, clock=lambda: at)
+
+    run(1000).replay_url(1)
     with pytest.raises(rd.BudgetExhausted):
-        rd.OpenDota(session, None, reserve=20, pace=no_pace(), state=state).replay_url(1)  # fresh run
-    assert len(session.calls) == 1
+        run(1000 + rd.OPENDOTA_RECHECK_S - 1).replay_url(1)
+    assert len(session.calls) == 1  # skipped without a call
+    assert run(1000 + rd.OPENDOTA_RECHECK_S).replay_url(1) == "u"  # the allowance is back
+    assert len(session.calls) == 2
 
 
 def test_take_page_ignores_unplayed_bot_games(tmp_path: Path):
