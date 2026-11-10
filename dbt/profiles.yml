@@ -5,8 +5,8 @@ dota:
   outputs:
     dev:
       type: duckdb
-      path: "{{ env_var('DUCKDB_PATH', 'dev.duckdb') }}"
-      schema: main
+      path: "{{ env_var('DUCKDB_PATH') }}"   # required, no default: a wrong working directory must not make an empty DB
+      schema: marts
     prod:
       type: postgres
       host: "{{ env_var('WAREHOUSE_HOST', 'localhost') }}"

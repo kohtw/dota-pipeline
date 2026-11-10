@@ -140,7 +140,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
   DUCKDB_PATH=~/.cache/dota/dev.duckdb DBT_TARGET_PATH=~/.cache/dota/target DBT_LOG_PATH=~/.cache/dota/logs \
     dbt build --project-dir dbt --profiles-dir dbt
   ```
-  (`--project-dir` is where `dbt_project.yml` is; `--profiles-dir` is where `profiles.yml` is. The `DBT_*_PATH` variables keep dbt's output out of the repo. Install with `pip install duckdb dbt-core dbt-duckdb` in a venv outside the repo.)
+  (dbt also writes `dbt/.user.yml`, `dbt/target/` and `dbt/logs/`: never commit them. `--project-dir` is where `dbt_project.yml` is; `--profiles-dir` is where `profiles.yml` is. The `DBT_*_PATH` variables keep dbt's output out of the repo. Install with `pip install duckdb dbt-core dbt-duckdb` in a venv outside the repo.)
 - Write portable SQL (plain joins and window functions) so the same models run on DuckDB and Postgres.
 
 ### 11. Tests
@@ -185,7 +185,7 @@ docker compose exec -w /opt/airflow/dags airflow-scheduler python -c "from dota 
 - Commit messages: `type(scope): what changed`, e.g. `feat(dbt): add mart_deaths`. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`. Keep each commit to one finished idea.
 - Open a PR into `master` and get one review. Keep PRs small: one idea each.
 - PR description: what changed, why, how you tested it, and which contract or table is affected.
-- Don't commit `data/`, `output/`, replays, Steam dumps or `.env`.
+- Never commit anything listed in rule 12.
 - Never force-push a shared branch, and never rewrite commits that others have pulled.
 
 ## Definition of done
