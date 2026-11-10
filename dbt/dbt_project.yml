@@ -1,0 +1,15 @@
+# dbt project: builds the marts schema from the clean tables. See docs/clean-contract.md.
+name: dota
+version: "0.1.0"
+config-version: 2
+profile: dota
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+models:
+  dota:
+    marts:
+      +schema: marts          # exact schema name, see macros/generate_schema_name.sql
+      +materialized: table
