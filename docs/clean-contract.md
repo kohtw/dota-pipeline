@@ -139,4 +139,17 @@ Written from the raw contract alone. Nobody has checked these against real Parqu
 3. `assist_players` holds the same IDs as `m_iPlayerID`.
 4. A PURCHASE row's `target` is the buyer and `value` is a `names` index.
 5. `m_flGameEndTime` is set by the last `gamerules` row.
-6. Steam tables (`steam_matches`, `steam_players`) are not defined yet; they need a real Steam page. Steam `player_slot` converts as `(ps & 127) + 5 * (ps >> 7)`.
+6. Steam tables (`steam_matches`, `steam_players`) are not defined yet. See the next section for what is already known.
+
+## Verified against real Steam pages (10 Nov)
+
+Checked on 3 real `GetMatchHistoryBySequenceNum` pages (300 matches, 145 ranked All Pick, 1,450 players):
+
+- Each match record carries the full scoreboard per player: `kills`, `deaths`, `assists`, `last_hits`, `denies`, `level`, `net_worth`, `gold` (unspent), `gold_spent`, `gold_per_min`, `xp_per_min`, `hero_damage`, `tower_damage`, `hero_healing`, `item_0`-`item_5`, `backpack_0`-`2`, `item_neutral`. So match-level data is already in the pages Winston collects.
+- **Slot rule confirmed:** Steam `player_slot` is 0-4 Radiant and 128-132 Dire. `(ps & 127) + 5 * (ps >> 7)` equals `team_number * 5 + team_slot` for all 1,450 players.
+- **Team numbering differs from the replay:** Steam `team_number` is `0` Radiant / `1` Dire. The replay uses `2` / `3`. Convert with `team_number + 2`.
+- `hero_id` is Valve's number and is never 0, so it joins to `players.hero_id`. Items are numeric ids, not names: an item id-to-name lookup table is needed.
+- `account_id` is anonymous (`4294967295`) for 840 of 1,450 players (58%). Never use it as a key.
+- `leaver_status` is non-zero for 50 of 1,450 players (3.4%): treat those matches as lower quality.
+- Team score (`radiant_score`, `dire_score`) is **not** the sum of player kills: it is at least that sum in every match, and equal in only 33 of 145. Do not use it as the kill-participation denominator. Compare player-level K/D/A instead.
+- No end time: use `start_time + pre_game_duration + duration`.
