@@ -77,10 +77,29 @@ def parse_pending():
 
         parse >> check_contract(match_id)
 
-    spark_clean = EmptyOperator(task_id="spark_clean", doc_md="Placeholder for the Spark raw -> clean job.")
-    dbt_build = EmptyOperator(task_id="dbt_build", doc_md="Placeholder for loading Postgres and `dbt build`.")
+    @task
+    def load_clean(match_ids: list[int]) -> dict[int, int]:
+        """Load each match's clean Parquet (written by spark_clean) into Postgres schema `clean`:
+        one transaction per match, idempotent (delete then insert), so a retry replaces rather
+        than doubles. Returns total rows loaded per match."""
+        from dota import storage, warehouse
 
-    parse_and_check.expand(match_id=find_unparsed()) >> spark_clean >> dbt_build
+        conn = warehouse.connect()
+        try:
+            totals: dict[int, int] = {}
+            for match_id in match_ids:
+                counts = warehouse.load_match(match_id, storage.read, storage.list_keys, conn)
+                print(f"loaded match {match_id}: {counts}")
+                totals[match_id] = sum(counts.values())
+            return totals
+        finally:
+            conn.close()
+
+    spark_clean = EmptyOperator(task_id="spark_clean", doc_md="Placeholder for the Spark raw -> clean job.")
+    dbt_build = EmptyOperator(task_id="dbt_build", doc_md="Placeholder for `dbt build` (the marts schema).")
+
+    pending = find_unparsed()
+    parse_and_check.expand(match_id=pending) >> spark_clean >> load_clean(pending) >> dbt_build
 
 
 parse_pending()
