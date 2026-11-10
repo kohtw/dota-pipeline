@@ -42,9 +42,9 @@ To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match
 
 To parse replays on your machine without Airflow (Spark needs Linux, so use the image; rebuild it after changing `parser/` or `spark_jobs/`):
 ```
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/output:/out" dota-parser "/data/*.dem" /out/parsed
+docker run --rm -v "$PWD/data/output:/demos:ro" -v "$PWD/data:/out" dota-parser "/demos/*.dem" /out/parsed
 ```
-Output: `output/parsed/{table}/match_id={id}/*.parquet`.
+Output: `data/parsed/{table}/match_id={id}/*.parquet`.
 
 To add or change a raw column or table, edit `spark_jobs/replay_spec.py` and update `docs/data-contract.md` in the same PR.
 
@@ -116,4 +116,4 @@ docker compose exec -w /opt/airflow/dags airflow-scheduler python -c "from dota 
 ## Git
 
 - Branch off `master`, open a PR, get one review.
-- Don't commit `data/`, `output/`, replays or `.env`.
+- Don't commit `data/` (except the reference demos in `data/output/` and parsed output in `data/parsed/`), other replays or `.env`.

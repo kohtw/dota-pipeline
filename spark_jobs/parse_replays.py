@@ -11,7 +11,7 @@ Paths can be local or s3a:// (Garage). For s3a, set env S3_ENDPOINT, S3_ACCESS_K
 Jars: env EXTRACTOR_JARS (set in the dota-parser image), else parser/build/extractor + parser/build/s3a.
 
 Run (in the dota-parser image, see parser/Dockerfile):
-  docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/output:/out" dota-parser "/data/*.dem" /out/parsed
+  docker run --rm -v "$PWD/data/output:/demos:ro" -v "$PWD/data:/out" dota-parser "/demos/*.dem" /out/parsed
   airflow: replays "s3a://raw/replays/<id>.dem", out "s3a://raw/parsed"
 """
 
@@ -55,8 +55,8 @@ def parse(spark: SparkSession, replays: str) -> dict[str, DataFrame]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("replays", help='glob or comma list, e.g. "data/*.dem" or "s3a://raw/replays/1.dem,s3a://..."')
-    ap.add_argument("out", help="output dir, e.g. output/parsed or s3a://raw/parsed")
+    ap.add_argument("replays", help='glob or comma list, e.g. "data/output/*.dem" or "s3a://raw/replays/1.dem,s3a://..."')
+    ap.add_argument("out", help="output dir, e.g. data/parsed or s3a://raw/parsed")
     args = ap.parse_args()
 
     spark = spark_session()
