@@ -22,7 +22,7 @@ import zstandard
 from botocore.config import Config
 
 ROOT = Path(__file__).resolve().parent.parent
-REPLAY_DIR = Path(os.environ.get("REPLAY_DIR", ROOT / "data"))
+REPLAY_DIR = Path(os.environ.get("REPLAY_DIR", ROOT / "data" / "output"))
 
 RAW_BUCKET = "raw"
 DEFAULT_MATCH = 9024732472

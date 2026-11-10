@@ -45,9 +45,9 @@ To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match
 
 To parse replays on your machine without Airflow (Spark needs Linux, so use the image; rebuild it after changing `parser/` or `spark_jobs/`):
 ```
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/output:/out" dota-parser "/data/*.dem" /out/parsed
+docker run --rm -v "$PWD/data/output:/demos:ro" -v "$PWD/data:/out" dota-parser "/demos/*.dem" /out/parsed
 ```
-Output: `output/parsed/{table}/match_id={id}/*.parquet`.
+Output: `data/parsed/{table}/match_id={id}/*.parquet`.
 
 To add or change a raw column or table, edit `spark_jobs/replay_spec.py` and update `docs/data-contract.md` in the same PR.
 
@@ -151,7 +151,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
 
 ### 12. Secrets and big files
 
-- Never commit `.env`, API keys, replays (`.dem`, `.dem.zst`), Steam page dumps, or anything under `data/` and `output/`. Put samples in the shared Drive folder instead.
+- Never commit `.env`, API keys, replays (`.dem`, `.dem.zst`), Steam page dumps, or anything under `data/` and `output/`, except the reference demos in `data/output/` and parsed output in `data/parsed/`. Put other samples in the shared Drive folder instead.
 - The dev S3 keys in `docker-compose.yml` are local-only. Never reuse them anywhere else.
 - Replays and Steam pages live in the shared Drive folder. Don't re-download what is already there.
 
@@ -185,7 +185,7 @@ docker compose exec -w /opt/airflow/dags airflow-scheduler python -c "from dota 
 - Commit messages: `type(scope): what changed`, e.g. `feat(dbt): add mart_deaths`. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`. Keep each commit to one finished idea.
 - Open a PR into `master` and get one review. Keep PRs small: one idea each.
 - PR description: what changed, why, how you tested it, and which contract or table is affected.
-- Don't commit `data/`, `output/`, replays, Steam dumps or `.env`.
+- Don't commit `data/` (except the reference demos in `data/output/` and parsed output in `data/parsed/`), `output/`, other replays, Steam dumps or `.env`.
 - Never force-push a shared branch, and never rewrite commits that others have pulled.
 
 ## Definition of done
