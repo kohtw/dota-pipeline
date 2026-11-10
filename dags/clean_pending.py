@@ -29,6 +29,9 @@ BATCH = 20  # matches per run; the rest wait for the next trigger
 PARALLEL_CLEANS = 2  # each Spark clean container is heavy, so cap concurrent ones per run
 # label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
 MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
+# the DockerOperator runs no Python, so nothing sets match_label in its context; derive its label
+# from the command instead (command = [input_base, output_base, match_id], so command[2] is the id)
+CLEAN_LABEL = "{{ task.command[2] }}"
 
 
 @dag(
@@ -66,7 +69,7 @@ def clean_pending():
             mount_tmp_dir=False,
             auto_remove="success",
             max_active_tis_per_dagrun=PARALLEL_CLEANS,
-            map_index_template=MATCH_LABEL,
+            map_index_template=CLEAN_LABEL,
         )
 
         # contract failures are not transient, so no retries
