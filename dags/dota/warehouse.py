@@ -11,6 +11,7 @@ psycopg2 and pyarrow are imported inside functions so DAG files can import this 
 
 import io
 import os
+import re
 from typing import Callable
 
 # Loaded in this order (no foreign keys, so order is free). Must match warehouse/init and
@@ -30,6 +31,25 @@ DEFAULTS = {"host": "localhost", "port": "5432", "user": "warehouse", "dbname": 
 
 def clean_prefix(table: str, match_id: int) -> str:
     return f"clean/{table}/match_id={match_id}/"
+
+
+CLEAN_COMPLETE = "clean/_complete"  # written by the clean job after all tables
+LOADED = "clean/_loaded"  # written by the load DAG after a match's DB load commits
+
+
+def loaded_marker_key(match_id: int) -> str:
+    """Object key of the loaded marker (an empty object, so the prefix lists non-empty)."""
+    return f"{LOADED}/match_id={match_id}/_loaded"
+
+
+def _ids(keys: list[str], prefix: str) -> set[int]:
+    return {int(m.group(1)) for k in keys if (m := re.match(rf"{re.escape(prefix)}/match_id=(\d+)/", k))}
+
+
+def unloaded(clean_complete_keys: list[str], loaded_keys: list[str]) -> list[int]:
+    """Match ids with a clean _complete marker but no _loaded marker, newest first. A load that
+    died before writing its marker counts as unloaded and runs again (load_match is idempotent)."""
+    return sorted(_ids(clean_complete_keys, CLEAN_COMPLETE) - _ids(loaded_keys, LOADED), reverse=True)
 
 
 def delete_sql(table: str) -> str:

@@ -1,0 +1,64 @@
+"""
+Load sweep: load every cleaned match's Parquet from Garage into Postgres schema `clean`.
+
+Asset-triggered: it runs whenever clean_pending produces CLEAN_READY. Like the other sweeps it
+works from what is in Garage, not from which run put it there: a match is skipped only once its
+clean/_loaded marker exists, and that marker is written AFTER the match's DB load commits. A load
+that died before the marker runs again, which is safe because load_match is idempotent (delete
+the match's rows, insert, one transaction).
+
+Needs the warehouse Postgres (WAREHOUSE_* env vars). It is not in docker-compose yet, so this
+DAG cannot run until that service exists -- expected, not a failure.
+
+  find_unloaded -> load_one (one per match: load_match -> write _loaded marker) -> CLEAN_LOADED
+"""
+
+from datetime import datetime, timedelta
+
+from airflow.sdk import dag, get_current_context, task
+
+from dota.alerts import ALERT_CALLBACKS
+from dota.assets import CLEAN_LOADED, CLEAN_READY
+
+BATCH = 20  # matches per run; the rest wait for the next trigger
+PARALLEL_LOADS = 4  # load is I/O-bound, so a few at once is fine
+# label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
+MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
+
+
+@dag(
+    schedule=[CLEAN_READY],
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=2), **ALERT_CALLBACKS},
+    tags=["orchestration"],
+)
+def load_pending():
+    @task
+    def find_unloaded() -> list[int]:
+        from dota import storage, warehouse
+
+        pending = warehouse.unloaded(storage.list_keys("clean/_complete/"),
+                                     storage.list_keys("clean/_loaded/"))
+        print(f"{len(pending)} matches unloaded; loading {min(len(pending), BATCH)} this run")
+        return pending[:BATCH]
+
+    @task(map_index_template=MATCH_LABEL, max_active_tis_per_dagrun=PARALLEL_LOADS, outlets=[CLEAN_LOADED])
+    def load_one(match_id: int) -> dict[str, int]:
+        from dota import storage, warehouse
+
+        get_current_context()["match_label"] = str(match_id)
+
+        conn = warehouse.connect()  # one connection per mapped task instance
+        try:
+            counts = warehouse.load_match(match_id, storage.read, storage.list_keys, conn)
+            storage.put(warehouse.loaded_marker_key(match_id))  # only after the load committed
+            return counts
+        finally:
+            conn.close()
+
+    load_one.expand(match_id=find_unloaded())
+
+
+load_pending()

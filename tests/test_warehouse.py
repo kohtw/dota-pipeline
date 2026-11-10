@@ -114,3 +114,23 @@ def test_connect_requires_a_password(monkeypatch):
     monkeypatch.delenv("WAREHOUSE_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="WAREHOUSE_PASSWORD"):
         warehouse.connect()
+
+
+def test_loaded_marker_key_lives_under_the_loaded_prefix():
+    key = warehouse.loaded_marker_key(MATCH)
+    assert key.startswith(f"clean/_loaded/match_id={MATCH}/")
+    assert warehouse.unloaded([f"clean/_complete/match_id={MATCH}/_SUCCESS"], [key]) == []
+
+
+def test_unloaded_is_complete_minus_loaded_newest_first():
+    complete = [f"clean/_complete/match_id={i}/part-0.parquet" for i in (5, 9, 7)]
+    complete.append("clean/_complete/match_id=9/part-1.parquet")  # duplicate id collapses
+    loaded = [warehouse.loaded_marker_key(7)]
+    assert warehouse.unloaded(complete, loaded) == [9, 5]
+
+
+def test_unloaded_ignores_unrelated_keys_and_loaded_without_complete():
+    complete = ["clean/_complete/match_id=3/x", "clean/matches/match_id=4/part.parquet", "junk"]
+    loaded = ["clean/_loaded/match_id=8/_loaded", "clean/_complete/match_id=3x/y"]
+    assert warehouse.unloaded(complete, loaded) == [3]
+    assert warehouse.unloaded([], []) == []
