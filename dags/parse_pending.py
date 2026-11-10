@@ -7,18 +7,20 @@ dota_daily_download, a manual upload, or a bulk import alike. A replay is only s
 parsed/_complete marker exists (written after all tables), so re-running parses nothing twice and
 a half-finished parse runs again.
 
-  find_unparsed -> parse_and_check (one per match: parse_replay -> check_contract)
-                -> spark_clean -> dbt_build   (placeholders until those parts exist)
+  find_unparsed -> parse_and_check (one per match: parse_replay -> check_contract) -> RAW_PARSED
+
+This is the FIRST stage of the asset chain: a successful parse+check produces RAW_PARSED, which
+wakes clean_pending, and so on down the chain (clean -> load -> dbt).
 """
 
 import os
 from datetime import datetime, timedelta
 
 from airflow.providers.docker.operators.docker import DockerOperator
-from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk import dag, get_current_context, task, task_group
 
 from dota.alerts import ALERT_CALLBACKS
+from dota.assets import RAW_PARSED
 from dota.config import BUCKET, DOCKER_NETWORK, S3_ENV_VARS
 
 BATCH = 20  # replays per run; the rest wait for the next hour
@@ -67,7 +69,7 @@ def parse_pending():
         )
 
         # contract failures are not transient, so no retries
-        @task(retries=0, map_index_template=MATCH_LABEL)
+        @task(retries=0, map_index_template=MATCH_LABEL, outlets=[RAW_PARSED])
         def check_contract(match_id: int) -> dict[str, int]:
             from dota import contract, storage
 
@@ -77,29 +79,7 @@ def parse_pending():
 
         parse >> check_contract(match_id)
 
-    @task
-    def load_clean(match_ids: list[int]) -> dict[int, int]:
-        """Load each match's clean Parquet (written by spark_clean) into Postgres schema `clean`:
-        one transaction per match, idempotent (delete then insert), so a retry replaces rather
-        than doubles. Returns total rows loaded per match."""
-        from dota import storage, warehouse
-
-        conn = warehouse.connect()
-        try:
-            totals: dict[int, int] = {}
-            for match_id in match_ids:
-                counts = warehouse.load_match(match_id, storage.read, storage.list_keys, conn)
-                print(f"loaded match {match_id}: {counts}")
-                totals[match_id] = sum(counts.values())
-            return totals
-        finally:
-            conn.close()
-
-    spark_clean = EmptyOperator(task_id="spark_clean", doc_md="Placeholder for the Spark raw -> clean job.")
-    dbt_build = EmptyOperator(task_id="dbt_build", doc_md="Placeholder for `dbt build` (the marts schema).")
-
-    pending = find_unparsed()
-    parse_and_check.expand(match_id=pending) >> spark_clean >> load_clean(pending) >> dbt_build
+    parse_and_check.expand(match_id=find_unparsed())
 
 
 parse_pending()
