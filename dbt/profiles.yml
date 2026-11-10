@@ -1,0 +1,17 @@
+# dev = local DuckDB file (no Docker). prod = the warehouse Postgres (needs dbt-postgres installed).
+# Run: dbt build --project-dir dbt --profiles-dir dbt [--target prod]
+dota:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', 'dev.duckdb') }}"
+      schema: main
+    prod:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_HOST', 'localhost') }}"
+      port: "{{ env_var('WAREHOUSE_PORT', '5432') | as_number }}"
+      user: "{{ env_var('WAREHOUSE_USER', 'warehouse') }}"
+      password: "{{ env_var('WAREHOUSE_PASSWORD') }}"
+      dbname: "{{ env_var('WAREHOUSE_DB', 'warehouse') }}"
+      schema: marts

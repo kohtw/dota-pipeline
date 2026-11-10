@@ -1,0 +1,35 @@
+# Tests for the marts. Each mart's key is its grain (docs/clean-contract.md).
+version: 2
+models:
+  - name: match_scoreboard
+    description: "One player in one match: final K/D/A, last hits, net worth, GPM, final items. Stats come from the last player_stats snapshot."
+    columns:
+      - name: player_key
+        data_tests: [not_null, unique]
+      - name: team
+        data_tests:
+          - accepted_values: {arguments: {values: [2, 3]}}
+      - name: won
+        data_tests: [not_null]
+      - name: gpm
+        description: "total_earned_gold per minute of game time"
+
+  - name: player_timeseries
+    description: "One player at one second: net worth, unspent gold, XP and more over game time."
+    columns:
+      - name: player_tick_key
+        data_tests: [not_null, unique]
+
+  - name: damage_by_pair
+    description: "Hero-to-hero damage by attacker, target and source, with the row's share of the attacker's team hero damage. Creep and tower damage is excluded."
+    columns:
+      - name: pair_key
+        data_tests: [not_null, unique]
+      - name: total_damage
+        data_tests: [not_null]
+
+  - name: kill_participation
+    description: "One player in one match: kills plus assists as a share of the team's kills. NULL when the team has no kills."
+    columns:
+      - name: player_key
+        data_tests: [not_null, unique]
