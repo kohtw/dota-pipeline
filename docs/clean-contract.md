@@ -125,8 +125,8 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 |---|---|---|
 | `match_scoreboard` | one player in one match | final K/D/A, last hits, net worth, GPM, final items |
 | `player_timeseries` | one player at one second | net worth and XP over time |
-| `damage_by_pair` | attacker, target, source in a match | who damaged whom, and share of team hero damage |
-| `kill_participation` | one player in one match | share of team kills the player took part in |
+| `damage_by_pair` | attacker, target, source in a match | who damaged which enemy hero, and share of the team's enemy-hero damage (creeps, towers and friendly fire excluded) |
+| `kill_participation` | one player in one match | (kills + assists) / team kills. Team kills = every enemy hero death; denies are nobody's kill. Stays within 0-1 |
 
 Later: `death_context`, `economy_gap`.
 
@@ -140,6 +140,7 @@ Written from the raw contract alone. Nobody has checked these against real Parqu
 4. A PURCHASE row's `target` is the buyer and `value` is a `names` index.
 5. `m_flGameEndTime` is set by the last `gamerules` row.
 6. Steam tables (`steam_matches`, `steam_players`) are not defined yet. See the next section for what is already known.
+7. The last `player_stats` snapshot of a match is assumed complete (not a truncated or post-game row). Unchecked.
 
 ## Verified against real Steam pages (10 Nov)
 

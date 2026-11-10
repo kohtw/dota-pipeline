@@ -6,8 +6,13 @@ models:
     columns:
       - name: player_key
         data_tests: [not_null, unique]
+      - name: hero_name
+        data_tests: [not_null]
+      - name: duration_s
+        data_tests: [not_null]
       - name: team
         data_tests:
+          - not_null
           - accepted_values: {arguments: {values: [2, 3]}}
       - name: won
         data_tests: [not_null]

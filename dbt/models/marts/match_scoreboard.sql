@@ -41,10 +41,11 @@ select
     s.hero_damage,
     s.tower_damage,
     s.healing,
-    s.total_earned_gold / (m.duration_s / 60.0) as gpm,
+    s.total_earned_gold / (nullif(m.duration_s, 0) / 60.0) as gpm,   -- NULL, not an error, for a zero duration
     m.duration_s,
     i.final_items
 from final_stats s
-join {{ source('clean', 'players') }} p using (match_id, player_slot)
-join {{ source('clean', 'matches') }} m using (match_id)
+-- left joins: a missing players/matches row shows up as NULL and fails the not_null tests, instead of dropping the row
+left join {{ source('clean', 'players') }} p using (match_id, player_slot)
+left join {{ source('clean', 'matches') }} m using (match_id)
 left join items i using (match_id, player_slot)
