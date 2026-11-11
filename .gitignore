@@ -6,3 +6,4 @@ data/*
 data/parsed/**/*.crc
 __pycache__/
 .env
+.venv
