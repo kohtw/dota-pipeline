@@ -8,6 +8,14 @@ import re
 
 MAX_ATTEMPTS = 3
 FAILED = "_failed"
+# 137 is a kill for memory, which Airflow retries; clean's 2 is a rejection, quarantined by _REJECTED
+NOT_CRASHES = {"parsed": {0, 137}, "clean": {0, 2, 137}}
+
+
+def counts_as_crash(exit_code: int | None, stage: str) -> bool:
+    """True when the stage's container ran and failed for a reason of its own. No exit code means
+    it never ran (missing image, docker-proxy down), which is not the match's fault."""
+    return exit_code is not None and exit_code not in NOT_CRASHES[stage]
 
 
 def failure_key(stage: str, match_id: int, run_id: str) -> str:

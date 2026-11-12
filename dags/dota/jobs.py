@@ -9,6 +9,8 @@ except ImportError:  # host tests run without Airflow and use only should_retry
     DockerContainerFailedException = AirflowFailException = APIError = Exception
     DockerOperator = object
 
+EXIT_CODE_KEY = "exit_code"
+
 
 def should_retry(state: dict) -> bool:
     """True when Docker's container State shows a kill for memory (OOMKilled or exit 137)."""
@@ -29,6 +31,9 @@ class JobOperator(DockerOperator):
             return super().execute(context)
         except DockerContainerFailedException as e:
             state = self._exit_state()
+            if "ExitCode" in state:
+                # the sweeps count only a container that ran and exited, not one that never started
+                context["ti"].xcom_push(key=EXIT_CODE_KEY, value=state["ExitCode"])
             if should_retry(state):
                 raise
             raise AirflowFailException(

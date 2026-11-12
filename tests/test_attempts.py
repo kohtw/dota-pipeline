@@ -1,3 +1,5 @@
+import pytest
+
 from dota import attempts
 
 RUN_ID = "manual__2026-11-12T10:15:00.123456+00:00"
@@ -34,3 +36,19 @@ def test_exhausted_ignores_other_stages():
     keys = [attempts.failure_key("clean", 1, r) for r in runs]
     assert attempts.exhausted(keys, "parsed") == set()
     assert attempts.exhausted(keys, "clean") == {1}
+
+
+@pytest.mark.parametrize("exit_code, stage, expected", [
+    (1, "parsed", True),
+    (1, "clean", True),
+    (2, "parsed", True),
+    (2, "clean", False),  # a rejection, quarantined by _REJECTED instead
+    (137, "parsed", False),
+    (137, "clean", False),
+    (None, "parsed", False),  # the container never ran
+    (None, "clean", False),
+    (0, "parsed", False),
+])
+def test_counts_as_crash_only_for_a_container_that_ran_and_failed_for_its_own_reason(
+        exit_code, stage, expected):
+    assert attempts.counts_as_crash(exit_code, stage) is expected

@@ -6,8 +6,8 @@ It works from what is in Garage, not from which DAG put it there, so it picks up
 dota_daily_download, a manual upload, or a bulk import alike. A replay is only skipped once its
 parsed/_complete marker exists (written after all tables), so re-running parses nothing twice and
 a half-finished parse runs again.
-A replay whose parse failed in 3 runs (counted by record_parse_failure under
-parsed/_failed/match_id={id}/) is skipped; delete those keys to retry it.
+A replay whose parser container crashed in 3 runs (a non-zero exit other than 137, counted by
+record_parse_failure under parsed/_failed/match_id={id}/) is skipped; delete those keys to retry it.
 
   find_unparsed -> parse_and_check (one per match: parse_replay -> check_contract) -> RAW_PARSED
 
@@ -23,7 +23,7 @@ from airflow.sdk import dag, get_current_context, task, task_group
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import RAW_PARSED
 from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
-from dota.jobs import JobOperator
+from dota.jobs import EXIT_CODE_KEY, JobOperator
 
 BATCH = 20  # replays per run; the rest wait for the next hour
 PARALLEL_PARSES = 2  # each parser container holds a whole replay in memory
@@ -82,8 +82,9 @@ def parse_pending():
 
             return contract.check_parsed(match_id, storage.read, storage.list_keys)
 
-        # Runs after parse_replay succeeds or fails, and decides from Garage: a run that left no
-        # _complete marker counts as one failed attempt, however many times it was retried.
+        # Runs after parse_replay succeeds or fails. A run that left no _complete marker counts as
+        # one failed attempt, however many times it was retried, but only if the parser crashed:
+        # a missing image or an unreachable docker-proxy is not the replay's fault.
         @task(trigger_rule="all_done", map_index_template=MATCH_LABEL)
         def record_parse_failure(match_id: int) -> bool:
             from dota import attempts, contract, storage
@@ -91,6 +92,12 @@ def parse_pending():
             context = get_current_context()
             context["match_label"] = str(match_id)
             if storage.list_keys(contract.partition_prefix(contract.COMPLETE, match_id)):
+                return False
+            ti = context["ti"]
+            # without map_indexes, Airflow 3 returns this key from every mapped parse_replay
+            exit_code = ti.xcom_pull(task_ids=parse.task_id, key=EXIT_CODE_KEY, map_indexes=ti.map_index)
+            if not attempts.counts_as_crash(exit_code, "parsed"):
+                print(f"match {match_id} did not parse (exit code {exit_code}); not counted as a crash")
                 return False
             key = attempts.failure_key("parsed", match_id, context["run_id"])
             storage.put(key)

@@ -8,8 +8,8 @@ not from which run put it there, and a match is only skipped once its clean/_com
 exists (written last, after all 9 tables), so a half-finished clean runs again and nothing is
 cleaned twice.
 
-The clean container image `dota-spark-clean` is Maximus's (CONTRIBUTING.md §13) and does not exist
-yet, so this DAG holds until he builds it — that is expected, not a failure.
+The clean container image `dota-spark-clean` is Maximus's (CONTRIBUTING.md §13). Without it every
+spark_clean task fails and alerts, but no container runs, so no match counts a failed attempt.
 
   find_uncleaned -> clean_and_check (one per match: clear_stale_report -> spark_clean -> check_clean)
                     -> CLEAN_READY; and, per match, spark_clean -> quarantine_rejected (runs even if
@@ -20,8 +20,10 @@ spark_clean task stays red once (and alerts once), quarantine_rejected writes
 clean/_rejected/match_id={id}/_REJECTED, and find_uncleaned skips it from then on. To clean such a
 match again (after a fix), delete that marker object. clear_stale_report deletes the match's old
 report.json before every clean, so a report found afterwards was written by that run. A missing
-report (the container died before writing one) writes no marker and fails quarantine_rejected, so a
-real crash is retried next run.
+report writes no _REJECTED marker and fails quarantine_rejected. If the container ran and exited
+with a code other than 137 or 2, that run counts as a crash under clean/_failed/match_id={id}/; after
+3 counted runs find_uncleaned skips the match, and deleting that prefix makes it eligible again.
+A failure with no container exit (missing image, docker-proxy down) counts nothing.
 """
 
 import os
@@ -34,7 +36,7 @@ from airflow.sdk.exceptions import AirflowFailException
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_READY, RAW_PARSED
 from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
-from dota.jobs import JobOperator
+from dota.jobs import EXIT_CODE_KEY, JobOperator
 
 BATCH = 20  # matches per run; the rest wait for the next trigger
 PARALLEL_CLEANS = 2  # each Spark clean container is heavy, so cap concurrent ones per run
@@ -112,8 +114,8 @@ def clean_pending():
 
         # Runs after spark_clean succeeds or fails. It ends green when it wrote a marker or had
         # nothing to do (the match was cleaned); the rejection itself stays visible as the red
-        # spark_clean task. No report means the container crashed, so it records a failed attempt
-        # and fails, but writes no _REJECTED marker.
+        # spark_clean task. No report means the job did not finish: it fails, writes no _REJECTED
+        # marker, and records a failed attempt only if the container crashed.
         @task(trigger_rule="all_done", retries=0, map_index_template=MATCH_LABEL)
         def quarantine_rejected(match_id: int, cleared: bool | None) -> bool:
             import json
@@ -126,7 +128,12 @@ def clean_pending():
                 raise AirflowFailException(f"stale report of match {match_id} was not cleared")
             report_key = clean_contract.report_key(match_id)
             if not storage.list_keys(report_key):
-                storage.put(attempts.failure_key("clean", match_id, context["run_id"]))
+                ti = context["ti"]
+                # without map_indexes, Airflow 3 returns this key from every mapped spark_clean
+                exit_code = ti.xcom_pull(task_ids=spark_clean.task_id, key=EXIT_CODE_KEY,
+                                         map_indexes=ti.map_index)
+                if attempts.counts_as_crash(exit_code, "clean"):
+                    storage.put(attempts.failure_key("clean", match_id, context["run_id"]))
                 raise AirflowFailException(f"no clean report at {report_key}: clean job did not finish")
             if not clean_contract.is_rejected(json.loads(storage.read(report_key))):
                 return False
