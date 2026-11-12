@@ -12,7 +12,7 @@ API = "https://api.steampowered.com/IDOTA2Match_570"
 ALL_PICK = 22  # game_mode; Turbo is 23
 RANKED = 7  # lobby_type
 MAX_PAGES = 20  # ceiling, not a target: the loop stops once it has n ids (usually ~2 pages of 100 matches)
-STEAM_ATTEMPTS = 4
+STEAM_ATTEMPTS = 5
 
 
 def _retry_after(r: requests.Response) -> int | None:
@@ -28,7 +28,8 @@ def call(method: str, *, sleep: Callable[[float], None] = time.sleep, **params) 
     for attempt in range(STEAM_ATTEMPTS):
         if attempt:
             sleep(wait)
-        wait = min(2 ** attempt, 30)
+        # Valve throttles in short windows; these waits (15, 30, 60, 120 s) follow the downloader's tested settings
+        wait = min(15 * 2 ** attempt, 120)
         try:
             r = requests.get(f"{API}/{method}/v1/", params={"key": os.environ["STEAM_API_KEY"], **params}, timeout=60)
         except requests.RequestException as e:
@@ -40,7 +41,7 @@ def call(method: str, *, sleep: Callable[[float], None] = time.sleep, **params) 
         if not is_transient_status(r.status_code):
             raise PermanentError(f"Steam {method} failed: {problem}") from None
         if (seconds := _retry_after(r)) is not None:
-            wait = seconds
+            wait = max(seconds, wait) if r.status_code == 429 else seconds
     raise RuntimeError(f"Steam {method} failed after {STEAM_ATTEMPTS} attempts: {problem}") from None
 
 
@@ -67,7 +68,7 @@ def ranked_all_pick_from(seq: int, n: int, save_page: Callable[[int, dict], None
 
 
 def fetch_pages(start_seq: int, pages: int, save_page: Callable[[int, dict], None], *,
-                sleep: Callable[[float], None] = time.sleep, pace_s: float = 1.0) -> int:
+                sleep: Callable[[float], None] = time.sleep, pace_s: float = 2.0) -> int:
     """Fetch up to `pages` contiguous pages of 100 matches from start_seq and save each. Stops at
     the first empty page. Returns the number of pages saved."""
     seq = start_seq

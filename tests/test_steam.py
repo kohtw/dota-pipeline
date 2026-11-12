@@ -75,7 +75,7 @@ def test_fetch_pages_stops_on_an_empty_page_without_saving_it(monkeypatch):
     assert steam.fetch_pages(1, 5, lambda s, r: saved.append(s), sleep=slept.append) == 1
     assert saved == [1]
     assert len(calls) == 2
-    assert slept == [1.0]
+    assert slept == [2.0]
 
 
 def test_http_error_message_does_not_contain_the_api_key(monkeypatch):
@@ -132,7 +132,7 @@ def test_429_then_ok_retries_and_returns_result(monkeypatch):
     slept = []
     assert steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1) == {"matches": []}
     assert len(calls) == 2
-    assert slept == [1]
+    assert slept == [15]
 
 
 def test_5xx_exhausts_attempts_then_raises_runtime_error(monkeypatch):
@@ -141,8 +141,8 @@ def test_5xx_exhausts_attempts_then_raises_runtime_error(monkeypatch):
     with pytest.raises(RuntimeError) as err:
         steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
     assert not isinstance(err.value, PermanentError)
-    assert len(calls) == 4
-    assert slept == [1, 2, 4]
+    assert len(calls) == 5
+    assert slept == [15, 30, 60, 120]
 
 
 def test_403_raises_permanent_error_without_retry(monkeypatch):
@@ -155,8 +155,15 @@ def test_403_raises_permanent_error_without_retry(monkeypatch):
 
 
 def test_retry_after_header_is_honoured_up_to_60s(monkeypatch):
-    responses(monkeypatch, Resp(429, headers={"Retry-After": "7"}), Resp(429, headers={"Retry-After": "120"}),
+    responses(monkeypatch, Resp(429, headers={"Retry-After": "45"}), Resp(429, headers={"Retry-After": "120"}),
               Resp(200, {}))
     slept = []
     steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
-    assert slept == [7, 2]
+    assert slept == [45, 30]
+
+
+def test_retry_after_never_shortens_a_429_wait_below_the_backoff(monkeypatch):
+    responses(monkeypatch, Resp(429, headers={"Retry-After": "5"}), Resp(200, {}))
+    slept = []
+    steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
+    assert slept == [15]
