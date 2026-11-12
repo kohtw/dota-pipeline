@@ -16,12 +16,12 @@ wakes clean_pending, and so on down the chain (clean -> load -> dbt).
 import os
 from datetime import datetime, timedelta
 
-from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import dag, get_current_context, task, task_group
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import RAW_PARSED
-from dota.config import BUCKET, DOCKER_NETWORK, S3_ENV_VARS
+from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
+from dota.jobs import JobOperator
 
 BATCH = 20  # replays per run; the rest wait for the next hour
 PARALLEL_PARSES = 2  # each parser container holds a whole replay in memory
@@ -55,7 +55,7 @@ def parse_pending():
             get_current_context()["match_label"] = str(match_id)
             return [f"s3a://{BUCKET}/replays/{match_id}.dem", f"s3a://{BUCKET}/parsed"]
 
-        parse = DockerOperator(
+        parse = JobOperator(
             task_id="parse_replay",
             image="dota-parser",
             command=parser_args(match_id),
@@ -63,7 +63,9 @@ def parse_pending():
             network_mode=DOCKER_NETWORK,
             private_environment={k: os.environ.get(k, "") for k in S3_ENV_VARS},  # hidden in the UI
             mount_tmp_dir=False,
-            auto_remove="success",
+            mem_limit=JOB_MEM_LIMIT,
+            pool="spark",
+            retries=1,
             max_active_tis_per_dagrun=PARALLEL_PARSES,
             map_index_template=PARSE_LABEL,
         )

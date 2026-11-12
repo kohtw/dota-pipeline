@@ -23,6 +23,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
+from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, STEAM_LOADED
@@ -71,6 +72,9 @@ def dbt_build():
         )
         print(result.stdout)
         print(result.stderr)
+        # exit 1 is a model or test failure, which a rerun repeats; 2 is an error such as a lost connection
+        if result.returncode == 1:
+            raise AirflowFailException("dbt build failed (exit 1)")
         if result.returncode != 0:
             raise RuntimeError(f"dbt build failed (exit {result.returncode})")
 

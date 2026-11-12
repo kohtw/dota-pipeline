@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from airflow.sdk import Variable, dag, task
 
 from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
+from dota.config import API_RETRY
 
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
 N_MATCHES = 50  # default replays per run
@@ -31,7 +32,8 @@ PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages pe
     default_args=ALERT_CALLBACKS,
 )
 def dota_daily_download():
-    @task
+    # an hour fits 20 pages plus newest_seq even if every call times out twice before it succeeds
+    @task(pool="steam_api", execution_timeout=timedelta(hours=1), **API_RETRY)
     def get_matches() -> list[int]:
         from dota import steam, storage
 
@@ -48,7 +50,7 @@ def dota_daily_download():
         return ids
 
     # retries cover OpenDota not having the replay salt yet
-    @task(retries=5, retry_delay=timedelta(minutes=1))
+    @task(pool="opendota_api", **API_RETRY)
     def download_replay(match_id: int) -> str:
         from dota import opendota, storage
 

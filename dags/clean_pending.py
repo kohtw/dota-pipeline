@@ -28,13 +28,13 @@ real crash is retried next run.
 import os
 from datetime import datetime, timedelta
 
-from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import dag, get_current_context, task, task_group
 from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_READY, RAW_PARSED
-from dota.config import BUCKET, DOCKER_NETWORK, S3_ENV_VARS
+from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
+from dota.jobs import JobOperator
 
 BATCH = 20  # matches per run; the rest wait for the next trigger
 PARALLEL_CLEANS = 2  # each Spark clean container is heavy, so cap concurrent ones per run
@@ -84,7 +84,7 @@ def clean_pending():
 
         cleared = clear_stale_report(match_id)
 
-        spark_clean = DockerOperator(
+        spark_clean = JobOperator(
             task_id="spark_clean",
             image="dota-spark-clean",
             command=clean_args(match_id),
@@ -92,10 +92,11 @@ def clean_pending():
             network_mode=DOCKER_NETWORK,
             private_environment={k: os.environ.get(k, "") for k in S3_ENV_VARS},  # hidden in the UI
             mount_tmp_dir=False,
-            auto_remove="success",
+            mem_limit=JOB_MEM_LIMIT,
+            pool="spark",
+            retries=1,  # JobOperator retries only a kill for memory, so a rejection still fails at once
             max_active_tis_per_dagrun=PARALLEL_CLEANS,
             map_index_template=CLEAN_LABEL,
-            retries=0,  # a rejection is not transient; quarantine_rejected handles it on the first failure
         )
 
         # contract failures are not transient, so no retries

@@ -121,7 +121,7 @@ services:
 
   airflow-init:
     <<: *airflow-common
-    command: db migrate
+    command: bash -c "airflow db migrate && airflow pools set spark 2 'Parser and Spark clean containers' && airflow pools set steam_api 1 'Steam Web API calls' && airflow pools set opendota_api 2 'OpenDota calls'"
     restart: "no"
 
   airflow-apiserver:
