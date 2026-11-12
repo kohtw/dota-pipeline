@@ -35,7 +35,7 @@ from dota.alerts import ALERT_CALLBACKS
 from dota.assets import STEAM_LOADED, STEAM_RAW
 from dota.config import WAREHOUSE_INIT_DIR
 
-BATCH = 20  # pages per run; the rest wait for the next run
+BATCH = 50  # pages per run; covers a 40-page steam_fetch run, so one load keeps up with each fetch
 DDL_PATH = WAREHOUSE_INIT_DIR / "04_steam_tables.sql"
 
 
