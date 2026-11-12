@@ -1,5 +1,7 @@
 import gzip
 import json
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from dota import steam_summary
 
 PAGE = json.loads((Path(__file__).parent / "fixtures" / "steam_page.json").read_text())
+DDL_FILE = Path(__file__).parents[1] / "warehouse" / "init" / "04_steam_tables.sql"
 
 
 def by_id(rows, mid):
@@ -22,9 +25,55 @@ def test_one_match_row_per_match_and_one_player_row_per_listed_player():
 def test_match_rows_have_exactly_the_table_columns():
     matches, players = steam_summary.parse_page(PAGE)
     assert set(matches[0]) == {"match_id", "match_seq_num", "start_time", "duration", "game_mode",
-                               "lobby_type", "radiant_win", "human_players"}
+                               "lobby_type", "radiant_win", "human_players", "radiant_score",
+                               "dire_score", "first_blood_time", "pre_game_duration", "cluster",
+                               "leagueid"}
     assert set(players[0]) == {"match_id", "player_slot", "hero_id", "kills", "deaths", "assists",
-                               "leaver_status"}
+                               "leaver_status", "team_number", "last_hits", "denies", "gold_per_min",
+                               "xp_per_min", "level", "net_worth", "hero_damage", "tower_damage",
+                               "hero_healing", "gold", "gold_spent", "item_0", "item_1", "item_2",
+                               "item_3", "item_4", "item_5", "backpack_0", "backpack_1", "backpack_2",
+                               "item_neutral"}
+
+
+def test_new_fields_are_read_from_the_page():
+    matches, players = steam_summary.parse_page(PAGE)
+    assert matches[0]["radiant_score"] == 30 and matches[0]["first_blood_time"] == 90
+    assert players[0]["gold_per_min"] == 300 and players[0]["team_number"] == 0
+    assert players[5]["team_number"] == 1 and players[0]["item_0"] == 63
+
+
+def ddl_columns(table):
+    """Column order of a table built by the DDL file: CREATE columns, then each ADD COLUMN."""
+    sql = DDL_FILE.read_text()
+    body = re.search(rf"CREATE TABLE IF NOT EXISTS stg\.{table} \((.*?)\n\);", sql, re.S).group(1)
+    cols = [line.split()[0] for line in body.strip().splitlines()
+            if not line.strip().startswith("PRIMARY KEY")]
+    return cols + re.findall(rf"ALTER TABLE stg\.{table} ADD COLUMN IF NOT EXISTS (\w+) ", sql)
+
+
+def insert_columns(sql):
+    return re.match(r"INSERT INTO stg\.\w+ \((.*)\) VALUES %s$", sql).group(1).split(", ")
+
+
+@pytest.mark.parametrize("table, sql", [("steam_matches", "MATCH_SQL"), ("steam_players", "PLAYER_SQL"),
+                                        ("steam_picks_bans", "PICK_BAN_SQL")])
+def test_insert_columns_are_every_ddl_column_in_ddl_order(table, sql):
+    assert insert_columns(getattr(steam_summary, sql)) == ddl_columns(table)
+
+
+def test_ddl_adds_the_new_columns_after_create_so_old_tables_upgrade():
+    assert ddl_columns("steam_matches")[:8] == list(steam_summary.MATCH_COLUMNS[:8])
+    assert ddl_columns("steam_matches")[-2:] == ["source_page", "loaded_at"]
+    assert "gold_per_min" in ddl_columns("steam_players")
+
+
+def test_no_account_id_anywhere():
+    matches, players = steam_summary.parse_page(PAGE)
+    picks_bans = steam_summary.parse_picks_bans(PAGE)
+    assert all("account_id" not in r for r in matches + players + picks_bans)
+    for sql in (steam_summary.MATCH_SQL, steam_summary.PLAYER_SQL, steam_summary.PICK_BAN_SQL):
+        assert "account_id" not in sql
 
 
 def test_types_are_int_and_bool():
@@ -57,12 +106,30 @@ def test_missing_player_field_becomes_none():
     page = {"matches": [{"match_id": 1, "players": [{"player_slot": 0}]}]}
     matches, players = steam_summary.parse_page(page)
     assert matches[0]["duration"] is None
-    assert players == [{"match_id": 1, "player_slot": 0, "hero_id": None, "kills": None,
-                        "deaths": None, "assists": None, "leaver_status": None}]
+    assert matches[0]["radiant_score"] is None and matches[0]["leagueid"] is None
+    assert players == [{"match_id": 1, **{c: None for c in steam_summary.PLAYER_COLUMNS}, "player_slot": 0}]
 
 
 def test_page_without_matches_is_empty():
     assert steam_summary.parse_page({"status": 1}) == ([], [])
+    assert steam_summary.parse_picks_bans({"status": 1}) == []
+
+
+def test_picks_bans_one_row_per_entry_with_order_as_ord():
+    rows = steam_summary.parse_picks_bans(PAGE)
+    assert len(rows) == 14 + 14 + 12 + 14
+    assert rows[0] == {"match_id": 9000000001, "ord": 0, "is_pick": True, "hero_id": 1, "team": 0}
+    assert {"match_id": 9000000001, "ord": 10, "is_pick": False, "hero_id": 60, "team": 0} in rows
+
+
+def test_match_without_picks_bans_gives_no_pick_ban_rows():
+    assert by_id(steam_summary.parse_picks_bans(PAGE), 9000000005) == []
+    assert steam_summary.parse_picks_bans({"matches": [{"match_id": 1, "picks_bans": None}]}) == []
+
+
+def test_missing_pick_ban_field_becomes_none():
+    rows = steam_summary.parse_picks_bans({"matches": [{"match_id": 1, "picks_bans": [{"order": 3}]}]})
+    assert rows == [{"match_id": 1, "ord": 3, "is_pick": None, "hero_id": None, "team": None}]
 
 
 class FakeCursor:
@@ -93,10 +160,10 @@ class FakeConn:
 DDL = "CREATE SCHEMA IF NOT EXISTS stg; -- fake ddl"
 
 
-def run_load(matches, players, conn=None):
+def run_load(matches, players, conn=None, **kw):
     conn = conn or FakeConn()
     inserts = []
-    n = steam_summary.load_steam(matches, players, conn, ddl=DDL,
+    n = steam_summary.load_steam(matches, players, conn, ddl=DDL, **kw,
                                  execute_values=lambda cur, sql, rows: (
                                      inserts.append((sql, rows)), conn.log.append(("insert", sql))))
     return n, conn, inserts
@@ -116,16 +183,53 @@ def test_ddl_runs_before_any_delete():
 
 def test_delete_then_insert_in_one_commit_and_returns_match_count():
     matches, players = steam_rows()
-    n, conn, inserts = run_load(matches, players)
+    n, conn, inserts = run_load(matches, players, picks_bans=steam_summary.parse_picks_bans(PAGE))
     assert n == 5
     kinds = [e[0] if e[0] != "execute" else e[1].split()[0] for e in conn.log]
-    assert kinds == ["CREATE", "DELETE", "DELETE", "insert", "insert", "commit", "close"]
+    assert kinds == ["CREATE", "DELETE", "DELETE", "DELETE", "insert", "insert", "insert", "commit", "close"]
     deletes = [e for e in conn.log if e[0] == "execute" and e[1].startswith("DELETE")]
-    assert {d[1] for d in deletes} == {"DELETE FROM stg.steam_players WHERE match_id = ANY(%s)",
+    assert {d[1] for d in deletes} == {"DELETE FROM stg.steam_picks_bans WHERE match_id = ANY(%s)",
+                                       "DELETE FROM stg.steam_players WHERE match_id = ANY(%s)",
                                        "DELETE FROM stg.steam_matches WHERE match_id = ANY(%s)"}
     assert all(sorted(d[2][0]) == sorted(m["match_id"] for m in matches) for d in deletes)
-    assert len(inserts[0][1]) == 5 and len(inserts[1][1]) == 48
+    assert len(inserts[0][1]) == 5 and len(inserts[1][1]) == 48 and len(inserts[2][1]) == 54
     assert inserts[0][0].startswith("INSERT INTO stg.steam_matches (match_id, match_seq_num")
+    assert inserts[2][0].startswith("INSERT INTO stg.steam_picks_bans (match_id, ord")
+
+
+def test_no_picks_bans_inserts_none_but_still_clears_old_ones():
+    matches, players = steam_rows()
+    _, conn, inserts = run_load(matches, players)
+    assert len(inserts) == 2
+    assert any(e[0] == "execute" and e[1].startswith("DELETE FROM stg.steam_picks_bans") for e in conn.log)
+
+
+def test_duplicate_pick_ban_in_a_batch_inserts_once_with_later_values():
+    matches, players = steam_rows()
+    picks_bans = steam_summary.parse_picks_bans(PAGE)
+    later = {**picks_bans[0], "hero_id": 99}
+    _, _, inserts = run_load(matches, players, picks_bans=picks_bans + [later])
+    rows = inserts[2][1]
+    assert len(rows) == 54
+    (row,) = [r for r in rows if r[:2] == (picks_bans[0]["match_id"], picks_bans[0]["ord"])]
+    assert row[3] == 99
+
+
+def test_source_page_and_loaded_at_reach_every_match_row():
+    matches, players = steam_rows()
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    _, _, inserts = run_load(matches, players, source_page="steam_raw/seq_1.json.gz")
+    rows = inserts[0][1]
+    assert {r[-2] for r in rows} == {"steam_raw/seq_1.json.gz"}
+    (loaded_at,) = {r[-1] for r in rows}
+    assert loaded_at.tzinfo is None  # naive UTC for a TIMESTAMP column
+    assert before <= loaded_at <= before + timedelta(seconds=5)
+
+
+def test_source_page_defaults_to_none():
+    matches, players = steam_rows()
+    _, _, inserts = run_load(matches, players)
+    assert {r[-2] for r in inserts[0][1]} == {None}
 
 
 def test_duplicate_match_in_a_batch_inserts_once_with_later_values():
@@ -197,6 +301,7 @@ def _gz(page: dict) -> bytes:
 
 def _run(pages: dict[str, bytes], fail_load_for: set[str] | None = None):
     events: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, int]] = []
     keys = list(pages)
     current = {}
 
@@ -204,28 +309,36 @@ def _run(pages: dict[str, bytes], fail_load_for: set[str] | None = None):
         current["key"] = key
         return pages[key]
 
-    def load(matches: list[dict], players: list[dict]) -> None:
+    def load(matches: list[dict], players: list[dict], *, picks_bans: list[dict], source_page: str) -> None:
         if current["key"] in (fail_load_for or set()):
             raise RuntimeError("db down")
         events.append(("load", current["key"]))
+        calls.append((current["key"], source_page, len(picks_bans)))
 
     def mark(key: str) -> None:
         events.append(("mark", key))
 
-    return steam_summary.load_pages_isolated(keys, read, load, mark), events
+    return steam_summary.load_pages_isolated(keys, read, load, mark), events, calls
 
 
 def test_load_pages_isolated_loads_and_marks_all() -> None:
     pages = {f"steam_raw/seq_{i}.json.gz": _gz(PAGE) for i in (1, 2, 3)}
-    (loaded, failed), events = _run(pages)
+    (loaded, failed), events, _ = _run(pages)
     assert loaded == list(pages) and failed == {}
     assert [e for e in events if e[0] == "mark"] == [("mark", k) for k in pages]
+
+
+def test_load_gets_the_page_key_as_source_page_and_its_picks_bans() -> None:
+    pages = {f"steam_raw/seq_{i}.json.gz": _gz(PAGE) for i in (1, 2)}
+    _, _, calls = _run(pages)
+    assert calls == [("steam_raw/seq_1.json.gz", "steam_raw/seq_1.json.gz", 54),
+                     ("steam_raw/seq_2.json.gz", "steam_raw/seq_2.json.gz", 54)]
 
 
 def test_bad_middle_page_does_not_stop_later_pages() -> None:
     pages = {"steam_raw/seq_1.json.gz": _gz(PAGE), "steam_raw/seq_2.json.gz": b"not gzip",
              "steam_raw/seq_3.json.gz": _gz(PAGE)}
-    (loaded, failed), events = _run(pages)
+    (loaded, failed), events, _ = _run(pages)
     assert loaded == ["steam_raw/seq_1.json.gz", "steam_raw/seq_3.json.gz"]
     assert list(failed) == ["steam_raw/seq_2.json.gz"] and failed["steam_raw/seq_2.json.gz"]
     assert ("mark", "steam_raw/seq_3.json.gz") in events
@@ -233,7 +346,7 @@ def test_bad_middle_page_does_not_stop_later_pages() -> None:
 
 def test_failed_load_is_not_marked() -> None:
     pages = {"steam_raw/seq_1.json.gz": _gz(PAGE), "steam_raw/seq_2.json.gz": _gz(PAGE)}
-    (loaded, failed), events = _run(pages, fail_load_for={"steam_raw/seq_1.json.gz"})
+    (loaded, failed), events, _ = _run(pages, fail_load_for={"steam_raw/seq_1.json.gz"})
     assert "RuntimeError" in failed["steam_raw/seq_1.json.gz"]
     assert ("mark", "steam_raw/seq_1.json.gz") not in events
     assert loaded == ["steam_raw/seq_2.json.gz"]
@@ -241,7 +354,7 @@ def test_failed_load_is_not_marked() -> None:
 
 def test_marker_written_only_after_load_returns() -> None:
     pages = {"steam_raw/seq_1.json.gz": _gz(PAGE)}
-    _, events = _run(pages)
+    _, events, _ = _run(pages)
     assert events == [("load", "steam_raw/seq_1.json.gz"), ("mark", "steam_raw/seq_1.json.gz")]
 
 

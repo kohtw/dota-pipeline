@@ -1,7 +1,8 @@
 """
 Steam load: flatten the raw Steam pages that the daily download saved in Garage (steam_raw/) and
-load them into the warehouse tables stg.steam_matches / stg.steam_players. Python only flattens and
-inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
+load them into the warehouse tables stg.steam_matches / stg.steam_players / stg.steam_picks_bans.
+Python only flattens and inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
+Each match row records its page key (source_page) and load time (loaded_at). See docs/steam-lane.md.
 
 Runs when new pages land (STEAM_RAW, from steam_fetch and the daily download) and daily at
 17:00 UTC. Like the other sweeps it works from what is in Garage: a page is
@@ -72,7 +73,8 @@ def steam_summary_elt():
         try:
             loaded, failed = steam_summary.load_pages_isolated(
                 page_keys, storage.read,
-                lambda matches, players: steam_summary.load_steam(matches, players, conn, ddl=ddl),
+                lambda matches, players, **page: steam_summary.load_steam(
+                    matches, players, conn, ddl=ddl, **page),
                 lambda key: storage.put(steam_summary.loaded_marker_key(key)))
         finally:
             conn.close()
