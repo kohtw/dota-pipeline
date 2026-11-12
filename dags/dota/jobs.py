@@ -4,9 +4,8 @@ try:
     from airflow.providers.docker.exceptions import DockerContainerFailedException
     from airflow.providers.docker.operators.docker import DockerOperator
     from airflow.sdk.exceptions import AirflowFailException
-    from docker.errors import APIError
 except ImportError:  # host tests run without Airflow and use only should_retry
-    DockerContainerFailedException = AirflowFailException = APIError = Exception
+    DockerContainerFailedException = AirflowFailException = Exception
     DockerOperator = object
 
 EXIT_CODE_KEY = "exit_code"
@@ -53,5 +52,5 @@ class JobOperator(DockerOperator):
             return
         try:
             self.cli.remove_container(self.container["Id"])
-        except APIError as e:
-            self.log.warning("could not remove container %s: %s", self.container["Id"], e)
+        except Exception as e:  # raised from finally, it would replace the task's real outcome
+            self.log.warning("could not remove container %s: %s", self.container["Id"], type(e).__name__)
