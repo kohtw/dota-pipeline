@@ -62,7 +62,7 @@ services:
       interval: 5s
       retries: 10
 
-  # analytics warehouse: the clean -> load -> dbt chain. Separate from Airflow's own postgres above
+  # analytics warehouse: the clean -> load -> dbt chain. Separate from the Airflow metadata database (airflow-db) above
   warehouse:
     image: postgres:16
     environment:
@@ -72,6 +72,8 @@ services:
     volumes:
       - warehouse-data:/var/lib/postgresql/data
       - ./warehouse/init:/docker-entrypoint-initdb.d:ro  # runs only on an empty volume
+    ports:
+      - "127.0.0.1:5433:5432"  # for host tools (notebooks, psql), loopback only; containers still use warehouse:5432
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "warehouse", "-d", "warehouse"]
       interval: 5s

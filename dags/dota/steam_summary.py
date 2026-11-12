@@ -8,6 +8,8 @@ import json
 import re
 from typing import Callable
 
+from dota.warehouse import _execute_values
+
 RAW_PREFIX = "steam_raw/"
 LOADED_PREFIX = "steam_raw/_loaded/"  # one empty marker per page, written after that page's load commits
 _PAGE = re.compile(r"^steam_raw/seq_(\d+)\.json\.gz$")
@@ -31,12 +33,6 @@ MATCH_SQL = "INSERT INTO stg.steam_matches (" + ", ".join(MATCH_COLUMNS) + ") VA
 PLAYER_KEY = ("match_id", "player_slot")
 PLAYER_ROW = PLAYER_KEY + PLAYER_COLUMNS[1:]
 PLAYER_SQL = "INSERT INTO stg.steam_players (" + ", ".join(PLAYER_ROW) + ") VALUES %s"
-
-
-def _execute_values(cur, sql: str, rows: list[tuple]) -> None:
-    from psycopg2.extras import execute_values
-
-    execute_values(cur, sql, rows)
 
 
 def load_steam(matches: list[dict], players: list[dict], conn, *, ddl: str,
