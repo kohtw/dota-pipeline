@@ -36,11 +36,13 @@ airflow/, garage/          Docker images for the local stack
    AIRFLOW_FERNET_KEY=the-generated-key
    ```
    `.env` is gitignored. Never commit it. Compose refuses to start without `AIRFLOW_FERNET_KEY`. Keep the key stable: a new key makes stored Airflow Variables unreadable.
-2. Build the parser image, then start everything:
+2. Build the parser and clean images, then start everything:
    ```
    docker build -t dota-parser -f parser/Dockerfile .
+   docker build -t dota-spark-clean -f spark_jobs/Dockerfile .
    docker compose up -d --build --remove-orphans
    ```
+   Airflow starts these two images as containers; `docker compose --build` does not rebuild them. Rebuild an image after pulling changes to `parser/` or `spark_jobs/`, or Airflow keeps running the old code.
 3. Open:
    - Airflow: http://localhost:8080 (no login)
    - Garage (file browser): http://localhost:3909
