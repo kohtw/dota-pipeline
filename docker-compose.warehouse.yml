@@ -1,0 +1,82 @@
+# Warehouse Postgres for the clean -> load -> dbt chain. Layer it over the base file:
+#   docker compose -p dota-pipeline -f docker-compose.yml -f docker-compose.warehouse.yml up -d
+# Anchors do not cross compose files, so each Airflow service names its WAREHOUSE_* vars itself.
+# Dev-only credentials. Inside compose the host is the service name, not localhost.
+
+services:
+  warehouse:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: warehouse
+      POSTGRES_DB: warehouse
+    volumes:
+      - warehouse-data:/var/lib/postgresql/data
+      - ./warehouse/init:/docker-entrypoint-initdb.d:ro  # runs only on an empty volume
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "warehouse", "-d", "warehouse"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    environment:
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "5432"
+      WAREHOUSE_USER: warehouse
+      WAREHOUSE_PASSWORD: warehouse
+      WAREHOUSE_DB: warehouse
+
+  airflow-apiserver:
+    environment:
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "5432"
+      WAREHOUSE_USER: warehouse
+      WAREHOUSE_PASSWORD: warehouse
+      WAREHOUSE_DB: warehouse
+    volumes:
+      - ./dbt:/opt/airflow/dbt:ro
+    depends_on:
+      warehouse:
+        condition: service_healthy
+
+  airflow-scheduler:
+    environment:
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "5432"
+      WAREHOUSE_USER: warehouse
+      WAREHOUSE_PASSWORD: warehouse
+      WAREHOUSE_DB: warehouse
+    volumes:
+      - ./dbt:/opt/airflow/dbt:ro
+    depends_on:
+      warehouse:
+        condition: service_healthy
+
+  airflow-dag-processor:
+    environment:
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "5432"
+      WAREHOUSE_USER: warehouse
+      WAREHOUSE_PASSWORD: warehouse
+      WAREHOUSE_DB: warehouse
+    volumes:
+      - ./dbt:/opt/airflow/dbt:ro
+    depends_on:
+      warehouse:
+        condition: service_healthy
+
+  airflow-triggerer:
+    environment:
+      WAREHOUSE_HOST: warehouse
+      WAREHOUSE_PORT: "5432"
+      WAREHOUSE_USER: warehouse
+      WAREHOUSE_PASSWORD: warehouse
+      WAREHOUSE_DB: warehouse
+    volumes:
+      - ./dbt:/opt/airflow/dbt:ro
+    depends_on:
+      warehouse:
+        condition: service_healthy
+
+volumes:
+  warehouse-data:
