@@ -1,6 +1,6 @@
 # Local Airflow, Garage and the warehouse Postgres for the replay and Steam pipelines.
 #   docker build -t dota-parser -f parser/Dockerfile .
-#   docker compose up -d --build
+#   docker compose up -d --build --remove-orphans
 # UI: http://localhost:8080 (no login)
 # S3 (Garage): http://localhost:3900 (API only; browse via garage-webui at http://localhost:3909), region us-east-1, path-style; creds below (dev only)
 
