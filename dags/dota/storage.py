@@ -40,6 +40,10 @@ def put(key: str, body: bytes = b"") -> None:
     client().put_object(Bucket=BUCKET, Key=key, Body=body)
 
 
+def delete_key(key: str) -> None:
+    client().delete_object(Bucket=BUCKET, Key=key)
+
+
 def list_keys(prefix: str) -> list[str]:
     keys = []
     for page in client().get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
