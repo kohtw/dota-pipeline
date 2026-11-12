@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import requests
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import downloader as rd  # noqa: E402
 

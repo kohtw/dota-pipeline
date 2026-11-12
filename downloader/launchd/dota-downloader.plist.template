@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  macOS launchd job for one route of scripts/downloader.py (steam or replays). launchd tries to
+  macOS launchd job for one route of downloader/downloader.py (steam or replays). launchd tries to
   start it every 10 minutes while the Mac is awake and skips the try while a run is still going, so
   a new run starts within 10 minutes of the last one ending. Each run stops after 55 minutes.
 
@@ -8,7 +8,7 @@
     mkdir -p ~/.local/share/dota-pipeline/logs
     for route in steam replays; do
       sed -e "s|__REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" -e "s|__ROUTE__|$route|g" \
-        scripts/launchd/dota-downloader.plist.template > ~/Library/LaunchAgents/dota-$route.plist
+        downloader/launchd/dota-downloader.plist.template > ~/Library/LaunchAgents/dota-$route.plist
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dota-$route.plist
     done
 
@@ -26,7 +26,7 @@
         <string>/usr/bin/caffeinate</string>
         <string>-i</string>
         <string>/opt/homebrew/bin/python3</string>
-        <string>__REPO__/scripts/downloader.py</string>
+        <string>__REPO__/downloader/downloader.py</string>
         <string>__ROUTE__</string>
     </array>
     <key>WorkingDirectory</key>

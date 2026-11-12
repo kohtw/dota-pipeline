@@ -30,10 +30,10 @@ Config (environment, or a .env file at the repo root):
   DOWNLOADER_HOME    state, staging, logs (default: ~/.local/share/dota-pipeline)
 
 Run:
-  python3 scripts/downloader.py check      # config only, no API calls
-  python3 scripts/downloader.py steam      # one pass of the Steam route
-  python3 scripts/downloader.py replays    # one pass of the replay route
-  python3 scripts/downloader.py status     # progress, no API calls
+  python3 downloader/downloader.py check      # config only, no API calls
+  python3 downloader/downloader.py steam      # one pass of the Steam route
+  python3 downloader/downloader.py replays    # one pass of the replay route
+  python3 downloader/downloader.py status     # progress, no API calls
 """
 
 import argparse
