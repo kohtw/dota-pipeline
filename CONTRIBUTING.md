@@ -27,11 +27,15 @@ airflow/, garage/          Docker images for the local stack
 
 ## Running locally
 
-1. Get a Steam API key (https://steamcommunity.com/dev/apikey) and put it in `.env` at the repo root:
+1. Get a Steam API key (https://steamcommunity.com/dev/apikey) and generate an Airflow Fernet key. Put both in `.env` at the repo root:
+   ```
+   python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+   ```
    ```
    STEAM_API_KEY=your-key
+   AIRFLOW_FERNET_KEY=the-generated-key
    ```
-   `.env` is gitignored. Never commit it.
+   `.env` is gitignored. Never commit it. Compose refuses to start without `AIRFLOW_FERNET_KEY`. Keep the key stable: a new key makes stored Airflow Variables unreadable.
 2. Build the parser image, then start everything:
    ```
    docker build -t dota-parser -f parser/Dockerfile .

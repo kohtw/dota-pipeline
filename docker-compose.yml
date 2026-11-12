@@ -23,6 +23,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     <<: *s3-creds
     S3_ENDPOINT: http://garage:3900
+    # one key for every Airflow container, so Variables and Connections decrypt everywhere; from .env
+    AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW_FERNET_KEY:?add AIRFLOW_FERNET_KEY to .env; generate one with: python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"}'
     STEAM_API_KEY: ${STEAM_API_KEY:-}  # from .env; https://steamcommunity.com/dev/apikey
     # warehouse Postgres (dev-only credentials); the host is the service name, not localhost
     WAREHOUSE_HOST: warehouse
