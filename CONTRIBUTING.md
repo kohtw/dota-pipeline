@@ -36,11 +36,13 @@ airflow/, garage/          Docker images for the local stack
    AIRFLOW_FERNET_KEY=the-generated-key
    ```
    `.env` is gitignored. Never commit it. Compose refuses to start without `AIRFLOW_FERNET_KEY`. Keep the key stable: a new key makes stored Airflow Variables unreadable.
-2. Build the parser image, then start everything:
+2. Build the parser and clean images, then start everything:
    ```
    docker build -t dota-parser -f parser/Dockerfile .
+   docker build -t dota-spark-clean -f spark_jobs/Dockerfile .
    docker compose up -d --build --remove-orphans
    ```
+   Airflow starts these two images as containers; `docker compose --build` does not rebuild them. Rebuild an image after pulling changes to `parser/` or `spark_jobs/`, or Airflow keeps running the old code.
 3. Open:
    - Airflow: http://localhost:8080 (no login)
    - Garage (file browser): http://localhost:3909
@@ -63,7 +65,7 @@ Follow these steps once if you started the stack before the Airflow database ser
 
 1. Add `AIRFLOW_FERNET_KEY` to `.env`. `.env.example` has the command that generates one. Until the key is set, every `docker compose` command stops with an error, including `ps` and `logs`.
 2. Run `docker compose up -d --build --remove-orphans`. The rename leaves the old `postgres` container running, and it uses the same `pg-data` volume as `airflow-db`. Two Postgres servers on one data directory corrupt it (run history, Variables, the download bookmark). `--remove-orphans` removes the old container only, not the volume.
-3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
+3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
 4. Rebuild your dev DuckDB file with `python warehouse/make_dev_db.py ~/.cache/dota/dev.duckdb` before the next local `dbt build` (rule 10). The project now has models that read `stg.steam_*`.
 
 ## Rules

@@ -95,6 +95,7 @@ def clean_pending():
             auto_remove="success",
             max_active_tis_per_dagrun=PARALLEL_CLEANS,
             map_index_template=CLEAN_LABEL,
+            retries=0,  # a rejection is not transient; quarantine_rejected handles it on the first failure
         )
 
         # contract failures are not transient, so no retries
