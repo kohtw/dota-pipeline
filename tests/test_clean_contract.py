@@ -106,3 +106,30 @@ def test_uncleaned_is_parsed_minus_clean_newest_first():
     clean = [f"clean/_complete/match_id={i}/part-0.parquet" for i in (5, 1)] + \
             ["clean/players/match_id=7/part-0.parquet"]
     assert cc.uncleaned(parsed, clean) == [9, 7, 3]
+
+
+def test_uncleaned_omits_rejected_ids():
+    parsed = [f"parsed/_complete/match_id={i}/part-0.parquet" for i in (3, 9, 5, 7)]
+    rejected = ["clean/_rejected/match_id=9/_REJECTED", "clean/_rejected/match_id=3/_REJECTED"]
+    assert cc.uncleaned(parsed, [], rejected) == [7, 5]
+
+
+def test_rejected_marker_constant():
+    assert cc.REJECTED == "_rejected"
+
+
+@pytest.mark.parametrize(("report", "expected"), [
+    ({"complete": True, "preview": False, "errors": []}, False),
+    ({"complete": False, "preview": True, "errors": ["bad deaths"]}, False),
+    ({"complete": False, "preview": False, "errors": ["bad deaths"]}, True),
+    ({"complete": False, "preview": False, "errors": []}, False),
+])
+def test_is_rejected(report, expected):
+    assert cc.is_rejected(report) is expected
+
+
+def test_report_and_rejected_keys():
+    assert cc.report_key(5) == "clean/_review/match_id=5/report.json"
+    assert cc.rejected_key(5) == "clean/_rejected/match_id=5/_REJECTED"
+    # the rejected marker must be one that uncleaned() recognises
+    assert cc.uncleaned(["parsed/_complete/match_id=5/_SUCCESS"], [], [cc.rejected_key(5)]) == []

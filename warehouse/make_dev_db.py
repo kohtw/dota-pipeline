@@ -11,12 +11,13 @@ HERE = Path(__file__).parent
 
 
 def build(path: str) -> None:
-    """Recreate the DuckDB file at `path` from warehouse/init/*.sql plus the fixture."""
+    """Recreate the DuckDB file at `path` from warehouse/init/*.sql plus the fixtures."""
     Path(path).unlink(missing_ok=True)  # always start clean so reruns are identical
     con = duckdb.connect(path)
     for f in sorted((HERE / "init").glob("*.sql")):
         con.execute(f.read_text())
     con.execute((HERE / "fixtures" / "sample_match.sql").read_text())
+    con.execute((HERE / "fixtures" / "sample_steam.sql").read_text())
     con.close()
 
 
