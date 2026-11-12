@@ -1,0 +1,4 @@
+version: 2
+models:
+  - name: stg_steam_ranked
+    description: "One player of every ranked All Pick match worth counting, from the Steam match summaries. Filter: lobby_type 7 (ranked), game_mode 22 (All Pick), duration at least 900 seconds (15 minutes), human_players 10, radiant_win known. Matches with leavers are kept: leaver_status is not filtered."

@@ -27,16 +27,22 @@ airflow/, garage/          Docker images for the local stack
 
 ## Running locally
 
-1. Get a Steam API key (https://steamcommunity.com/dev/apikey) and put it in `.env` at the repo root:
+1. Get a Steam API key (https://steamcommunity.com/dev/apikey) and generate an Airflow Fernet key. Put both in `.env` at the repo root:
+   ```
+   python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+   ```
    ```
    STEAM_API_KEY=your-key
+   AIRFLOW_FERNET_KEY=the-generated-key
    ```
-   `.env` is gitignored. Never commit it.
-2. Build the parser image, then start everything:
+   `.env` is gitignored. Never commit it. Compose refuses to start without `AIRFLOW_FERNET_KEY`. Keep the key stable: a new key makes stored Airflow Variables unreadable.
+2. Build the parser and clean images, then start everything:
    ```
    docker build -t dota-parser -f parser/Dockerfile .
-   docker compose up -d --build
+   docker build -t dota-spark-clean -f spark_jobs/Dockerfile .
+   docker compose up -d --build --remove-orphans
    ```
+   Airflow starts these two images as containers; `docker compose --build` does not rebuild them. Rebuild an image after pulling changes to `parser/` or `spark_jobs/`, or Airflow keeps running the old code.
 3. Open:
    - Airflow: http://localhost:8080 (no login)
    - Garage (file browser): http://localhost:3909
@@ -45,13 +51,22 @@ To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match
 
 To parse replays on your machine without Airflow (Spark needs Linux, so use the image; rebuild it after changing `parser/` or `spark_jobs/`):
 ```
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/output:/out" dota-parser "/data/*.dem" /out/parsed
+docker run --rm -v "$PWD/data/output:/demos:ro" -v "$PWD/data:/out" dota-parser "/demos/*.dem" /out/parsed
 ```
-Output: `output/parsed/{table}/match_id={id}/*.parquet`.
+Output: `data/parsed/{table}/match_id={id}/*.parquet`.
 
 To add or change a raw column or table, edit `spark_jobs/replay_spec.py` and update `docs/data-contract.md` in the same PR.
 
 Don't trigger `dota_daily_download` by hand. Each run saves a bookmark that the next run starts from (see the file's docstring), so a manual run shifts the next day's window.
+
+### Upgrading an existing stack
+
+Follow these steps once if you started the stack before the Airflow database service was renamed from `postgres` to `airflow-db`. Do them in this order.
+
+1. Add `AIRFLOW_FERNET_KEY` to `.env`. `.env.example` has the command that generates one. Until the key is set, every `docker compose` command stops with an error, including `ps` and `logs`.
+2. Run `docker compose up -d --build --remove-orphans`. The rename leaves the old `postgres` container running, and it uses the same `pg-data` volume as `airflow-db`. Two Postgres servers on one data directory corrupt it (run history, Variables, the download bookmark). `--remove-orphans` removes the old container only, not the volume.
+3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
+4. Rebuild your dev DuckDB file with `python warehouse/make_dev_db.py ~/.cache/dota/dev.duckdb` before the next local `dbt build` (rule 10). The project now has models that read `stg.steam_*`.
 
 ## Rules
 
@@ -151,7 +166,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
 
 ### 12. Secrets and big files
 
-- Never commit `.env`, API keys, replays (`.dem`, `.dem.zst`), Steam page dumps, or anything under `data/` and `output/`. Put samples in the shared Drive folder instead.
+- Never commit `.env`, API keys, replays (`.dem`, `.dem.zst`), Steam page dumps, or anything under `data/` and `output/`, except the reference demos in `data/output/` and parsed output in `data/parsed/`. Put other samples in the shared Drive folder instead.
 - The dev S3 keys in `docker-compose.yml` are local-only. Never reuse them anywhere else.
 - Replays and Steam pages live in the shared Drive folder. Don't re-download what is already there.
 
@@ -185,14 +200,14 @@ docker compose exec -w /opt/airflow/dags airflow-scheduler python -c "from dota 
 - Commit messages: `type(scope): what changed`, e.g. `feat(dbt): add mart_deaths`. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`. Keep each commit to one finished idea.
 - Open a PR into `master` and get one review. Keep PRs small: one idea each.
 - PR description: what changed, why, how you tested it, and which contract or table is affected.
-- Don't commit `data/`, `output/`, replays, Steam dumps or `.env`.
+- Don't commit `data/` (except the reference demos in `data/output/` and parsed output in `data/parsed/`), `output/`, other replays, Steam dumps or `.env`.
 - Never force-push a shared branch, and never rewrite commits that others have pulled.
 
 ## Definition of done
 
 A change is done when:
 
-1. It works from a clean `docker compose up -d --build`.
+1. It works from a clean `docker compose up -d --build --remove-orphans`.
 2. Its tests pass, and it re-runs safely (rule 5).
 3. `docs/data-contract.md` matches what it writes (rule 6).
 4. Comments explain the why (rule 7), and there is no commented-out code.

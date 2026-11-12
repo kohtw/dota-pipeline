@@ -1,0 +1,10 @@
+.git
+.venv
+.vscode
+.env
+data
+output
+notebooks
+parser/.gradle
+parser/build
+**/__pycache__

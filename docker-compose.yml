@@ -1,8 +1,11 @@
-# Local Airflow for the replay DAG.
+# Local Airflow, Garage and the warehouse Postgres for the replay and Steam pipelines.
 #   docker build -t dota-parser -f parser/Dockerfile .
-#   docker compose up --build
+#   docker compose up -d --build --remove-orphans
 # UI: http://localhost:8080 (no login)
 # S3 (Garage): http://localhost:3900 (API only; browse via garage-webui at http://localhost:3909), region us-east-1, path-style; creds below (dev only)
+
+# fixed project name: the DAGs hard-code the network dota-pipeline_default, so no -p flag is needed
+name: dota-pipeline
 
 x-s3-creds: &s3-creds
   S3_ACCESS_KEY: GK1a2b3c4d5e6f7a8b9c0d1e2f
@@ -12,7 +15,7 @@ x-airflow-common: &airflow-common
   build: ./airflow
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     # shared across containers so api-server and scheduler trust each other's tokens
@@ -20,20 +23,33 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     <<: *s3-creds
     S3_ENDPOINT: http://garage:3900
+    # one key for every Airflow container, so Variables and Connections decrypt everywhere; from .env
+    AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW_FERNET_KEY:?add AIRFLOW_FERNET_KEY to .env; generate one with: python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"}'
     STEAM_API_KEY: ${STEAM_API_KEY:-}  # from .env; https://steamcommunity.com/dev/apikey
+    # warehouse Postgres (dev-only credentials); the host is the service name, not localhost
+    WAREHOUSE_HOST: warehouse
+    WAREHOUSE_PORT: "5432"
+    WAREHOUSE_USER: warehouse
+    WAREHOUSE_PASSWORD: warehouse
+    WAREHOUSE_DB: warehouse
   volumes:
     - ./dags:/opt/airflow/dags
+    - ./dbt:/opt/airflow/dbt:ro  # read by dbt_build
+    - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL applied by dbt_build and steam_summary_elt
     - dota-data:/data
   depends_on: &airflow-depends
-    postgres:
+    airflow-db:
       condition: service_healthy
     docker-proxy:
       condition: service_started
     garage:
       condition: service_healthy
+    warehouse:
+      condition: service_healthy
 
 services:
-  postgres:
+  # Airflow metadata database (DAG runs, Variables); the analytics data lives in `warehouse` below
+  airflow-db:
     image: postgres:16
     environment:
       POSTGRES_USER: airflow
@@ -43,6 +59,23 @@ services:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  # analytics warehouse: the clean -> load -> dbt chain. Separate from the Airflow metadata database (airflow-db) above
+  warehouse:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: warehouse
+      POSTGRES_DB: warehouse
+    volumes:
+      - warehouse-data:/var/lib/postgresql/data
+      - ./warehouse/init:/docker-entrypoint-initdb.d:ro  # runs only on an empty volume
+    ports:
+      - "127.0.0.1:5433:5432"  # for host tools (notebooks, psql), loopback only; containers still use warehouse:5432
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "warehouse", "-d", "warehouse"]
       interval: 5s
       retries: 10
 
@@ -127,5 +160,6 @@ services:
 volumes:
   pg-data:
   garage-data:
+  warehouse-data:
   dota-data:
     name: dota-data  # fixed name so the DAG's DockerOperator can mount it

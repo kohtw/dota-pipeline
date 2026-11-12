@@ -8,6 +8,8 @@ ended ~24h ago: every game length is included and replays are ready.
 The first run only saves the bookmark.
 """
 
+import gzip
+import json
 from datetime import datetime, timedelta, timezone
 
 from airflow.sdk import Variable, dag, task
@@ -15,8 +17,10 @@ from airflow.sdk import Variable, dag, task
 from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
 
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
-N_MATCHES = 50
+N_MATCHES = 50  # default replays per run
+MATCHES_VAR = "matches_per_run"  # Airflow Variable: overrides N_MATCHES (e.g. a small test run, or a bigger quota)
 BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
+PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages per run; the loop stops once it has N_MATCHES ids (usually ~2 pages)
 
 
 @dag(
@@ -29,10 +33,15 @@ BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
 def dota_daily_download():
     @task
     def get_matches() -> list[int]:
-        from dota import steam
+        from dota import steam, storage
+
+        def save_page(start_seq: int, page: dict) -> None:
+            storage.put(f"steam_raw/seq_{start_seq}.json.gz", gzip.compress(json.dumps(page).encode()))
 
         bookmark = Variable.get(BOOKMARK, default=None)
-        ids = steam.ranked_all_pick_from(int(bookmark), N_MATCHES) if bookmark else []
+        pages = int(Variable.get(PAGES_VAR, default=steam.MAX_PAGES))
+        n_matches = int(Variable.get(MATCHES_VAR, default=N_MATCHES))
+        ids = steam.ranked_all_pick_from(int(bookmark), n_matches, save_page, max_pages=pages) if bookmark else []
         if bookmark and not ids:
             raise RuntimeError(f"no ranked matches after seq {bookmark}")
         Variable.set(BOOKMARK, str(steam.newest_seq()))

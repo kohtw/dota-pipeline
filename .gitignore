@@ -1,6 +1,9 @@
 bin/
 build/
 .gradle/
-output/
+data/*
+!data/parsed/
+data/parsed/**/*.crc
 __pycache__/
 .env
+.venv

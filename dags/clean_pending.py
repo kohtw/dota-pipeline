@@ -12,7 +12,17 @@ fallback for a missed trigger is a manual DAG trigger (a future scheduled sweep 
 The clean container image `dota-spark-clean` is Maximus's (CONTRIBUTING.md §13) and does not exist
 yet, so this DAG holds until he builds it — that is expected, not a failure.
 
-  find_uncleaned -> clean_and_check (one per match: spark_clean -> check_clean) -> CLEAN_READY
+  find_uncleaned -> clean_and_check (one per match: clear_stale_report -> spark_clean -> check_clean)
+                    -> CLEAN_READY; and, per match, spark_clean -> quarantine_rejected (runs even if
+                    spark_clean failed)
+
+A match the clean job rejects (exit 2, report with errors, no _complete marker) is quarantined: its
+spark_clean task stays red once (and alerts once), quarantine_rejected writes
+clean/_rejected/match_id={id}/_REJECTED, and find_uncleaned skips it from then on. To clean such a
+match again (after a fix), delete that marker object. clear_stale_report deletes the match's old
+report.json before every clean, so a report found afterwards was written by that run. A missing
+report (the container died before writing one) writes no marker and fails quarantine_rejected, so a
+real crash is retried next run.
 """
 
 import os
@@ -20,6 +30,7 @@ from datetime import datetime, timedelta
 
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import dag, get_current_context, task, task_group
+from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_READY, RAW_PARSED
@@ -48,7 +59,8 @@ def clean_pending():
         from dota import clean_contract, storage
 
         pending = clean_contract.uncleaned(storage.list_keys("parsed/_complete/"),
-                                           storage.list_keys(f"clean/{clean_contract.COMPLETE}/"))
+                                           storage.list_keys(f"clean/{clean_contract.COMPLETE}/"),
+                                           storage.list_keys(f"clean/{clean_contract.REJECTED}/"))
         print(f"{len(pending)} matches uncleaned; cleaning {min(len(pending), BATCH)} this run")
         return pending[:BATCH]
 
@@ -58,6 +70,19 @@ def clean_pending():
         def clean_args(match_id: int) -> list[str]:
             get_current_context()["match_label"] = str(match_id)
             return [f"s3a://{BUCKET}/parsed", f"s3a://{BUCKET}/clean", str(match_id)]
+
+        # the clean job rewrites report.json only late in a run, so drop last run's before this one
+        @task(map_index_template=MATCH_LABEL)
+        def clear_stale_report(match_id: int) -> bool:
+            from dota import clean_contract, storage
+
+            get_current_context()["match_label"] = str(match_id)
+            key = clean_contract.report_key(match_id)
+            if storage.list_keys(key):
+                storage.delete_key(key)
+            return True
+
+        cleared = clear_stale_report(match_id)
 
         spark_clean = DockerOperator(
             task_id="spark_clean",
@@ -70,6 +95,7 @@ def clean_pending():
             auto_remove="success",
             max_active_tis_per_dagrun=PARALLEL_CLEANS,
             map_index_template=CLEAN_LABEL,
+            retries=0,  # a rejection is not transient; quarantine_rejected handles it on the first failure
         )
 
         # contract failures are not transient, so no retries
@@ -81,7 +107,29 @@ def clean_pending():
 
             return clean_contract.check_parsed(match_id, storage.read, storage.list_keys)
 
-        spark_clean >> check_clean(match_id)
+        # Runs after spark_clean succeeds or fails. It ends green when it wrote a marker or had
+        # nothing to do (the match was cleaned); the rejection itself stays visible as the red
+        # spark_clean task. No report means the container crashed, so it fails and writes no marker.
+        @task(trigger_rule="all_done", retries=0, map_index_template=MATCH_LABEL)
+        def quarantine_rejected(match_id: int, cleared: bool | None) -> bool:
+            import json
+
+            from dota import clean_contract, storage
+
+            get_current_context()["match_label"] = str(match_id)
+            if cleared is not True:  # clear_stale_report failed, so any report may be a previous run's
+                raise AirflowFailException(f"stale report of match {match_id} was not cleared")
+            report_key = clean_contract.report_key(match_id)
+            if not storage.list_keys(report_key):
+                raise AirflowFailException(f"no clean report at {report_key}: clean job did not finish")
+            if not clean_contract.is_rejected(json.loads(storage.read(report_key))):
+                return False
+            storage.put(clean_contract.rejected_key(match_id))
+            print(f"match {match_id} rejected by the clean job; quarantined (delete the marker to retry)")
+            return True
+
+        cleared >> spark_clean
+        spark_clean >> [check_clean(match_id), quarantine_rejected(match_id, cleared)]
 
     clean_and_check.expand(match_id=find_uncleaned())
 

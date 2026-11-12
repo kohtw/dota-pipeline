@@ -134,3 +134,50 @@ def test_unloaded_ignores_unrelated_keys_and_loaded_without_complete():
     loaded = ["clean/_loaded/match_id=8/_loaded", "clean/_complete/match_id=3x/y"]
     assert warehouse.unloaded(complete, loaded) == [3]
     assert warehouse.unloaded([], []) == []
+
+
+def write_init(tmp_path, files: dict[str, str]):
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def test_init_sql_files_are_in_name_order_and_only_sql(tmp_path):
+    write_init(tmp_path, {"02_b.sql": "B", "01_a.sql": "A", "10_c.sql": "C", "notes.md": "x", "03.sql.bak": "y"})
+    assert [p.name for p in warehouse.init_sql_files(tmp_path)] == ["01_a.sql", "02_b.sql", "10_c.sql"]
+
+
+def test_init_sql_files_raises_naming_a_missing_directory(tmp_path):
+    missing = tmp_path / "nope"
+    with pytest.raises(FileNotFoundError, match="nope"):
+        warehouse.init_sql_files(missing)
+
+
+def test_apply_init_sql_runs_every_file_in_order_in_one_transaction(tmp_path):
+    write_init(tmp_path, {"02_b.sql": "SELECT 2;", "01_a.sql": "SELECT 1;", "readme.txt": "no"})
+    conn = FakeConn()
+    assert warehouse.apply_init_sql(tmp_path, conn) == ["01_a.sql", "02_b.sql"]
+    assert [sql for sql, _ in conn.cur.executed] == ["SELECT 1;", "SELECT 2;"]
+    assert conn.commits == 1 and conn.rollbacks == 0 and conn.cur.closed
+
+
+def test_apply_init_sql_rolls_back_and_reraises_on_a_failed_statement(tmp_path):
+    write_init(tmp_path, {"01_a.sql": "SELECT 1;", "02_b.sql": "BOOM"})
+    conn = FakeConn()
+
+    def execute(sql, params=None):
+        if sql == "BOOM":
+            raise RuntimeError("bad sql")
+        conn.cur.executed.append((sql, params))
+
+    conn.cur.execute = execute
+    with pytest.raises(RuntimeError, match="bad sql"):
+        warehouse.apply_init_sql(tmp_path, conn)
+    assert conn.rollbacks == 1 and conn.commits == 0 and conn.cur.closed
+
+
+def test_apply_init_sql_with_a_missing_directory_touches_nothing(tmp_path):
+    conn = FakeConn()
+    with pytest.raises(FileNotFoundError):
+        warehouse.apply_init_sql(tmp_path / "nope", conn)
+    assert conn.cur.executed == [] and conn.commits == 0

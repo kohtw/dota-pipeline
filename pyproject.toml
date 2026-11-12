@@ -1,4 +1,4 @@
 [tool.pytest.ini_options]
 # tests import the DAG logic (dags/dota) and the scripts the same way Airflow does
-pythonpath = ["dags", "scripts"]
-testpaths = ["tests"]
+pythonpath = ["dags", "scripts", "downloader"]
+testpaths = ["tests", "downloader/tests"]

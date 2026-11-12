@@ -12,6 +12,7 @@ psycopg2 and pyarrow are imported inside functions so DAG files can import this 
 import io
 import os
 import re
+from pathlib import Path
 from typing import Callable
 
 # Loaded in this order (no foreign keys, so order is free). Must match warehouse/init and
@@ -117,6 +118,32 @@ def load_match(match_id: int, read: Callable[[str], bytes],
             counts[table] = len(rows)
         conn.commit()
         return counts
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def init_sql_files(init_dir: Path) -> list[Path]:
+    """The `*.sql` files in the warehouse init directory, in name order. Anything else is ignored."""
+    if not init_dir.is_dir():
+        raise FileNotFoundError(
+            f"{init_dir} not found: mount ./warehouse/init at /opt/airflow/warehouse/init (docker-compose.yml)")
+    return sorted(init_dir.glob("*.sql"), key=lambda p: p.name)
+
+
+def apply_init_sql(init_dir: Path, conn) -> list[str]:
+    """Runs every init SQL file in name order in one transaction, so the schemas and tables exist on
+    a warehouse volume that predates them. Every file must be safe to repeat (IF NOT EXISTS).
+    Returns the file names applied; on any error nothing is committed."""
+    files = init_sql_files(init_dir)
+    cur = conn.cursor()
+    try:
+        for path in files:
+            cur.execute(path.read_text())
+        conn.commit()
+        return [p.name for p in files]
     except Exception:
         conn.rollback()
         raise

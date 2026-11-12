@@ -1,0 +1,6 @@
+pandas>=2.2,<4
+pyarrow>=18
+ipykernel>=6,<8
+matplotlib>=3.8
+duckdb>=1.0
+psycopg2-binary>=2.9
