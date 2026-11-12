@@ -15,7 +15,7 @@ x-airflow-common: &airflow-common
   build: ./airflow
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     # shared across containers so api-server and scheduler trust each other's tokens
@@ -38,7 +38,7 @@ x-airflow-common: &airflow-common
     - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL applied by dbt_build and steam_summary_elt
     - dota-data:/data
   depends_on: &airflow-depends
-    postgres:
+    airflow-db:
       condition: service_healthy
     docker-proxy:
       condition: service_started
@@ -48,7 +48,8 @@ x-airflow-common: &airflow-common
       condition: service_healthy
 
 services:
-  postgres:
+  # Airflow metadata database (DAG runs, Variables); the analytics data lives in `warehouse` below
+  airflow-db:
     image: postgres:16
     environment:
       POSTGRES_USER: airflow
