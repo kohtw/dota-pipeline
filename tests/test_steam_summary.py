@@ -186,3 +186,59 @@ def test_unloaded_pages_orders_by_sequence_number_not_text() -> None:
 
 def test_loaded_marker_key_uses_page_basename() -> None:
     assert steam_summary.loaded_marker_key("steam_raw/seq_10.json.gz") == "steam_raw/_loaded/seq_10.json.gz"
+
+
+def _gz(page: dict) -> bytes:
+    import gzip
+
+    return gzip.compress(json.dumps(page).encode())
+
+
+def _run(pages: dict[str, bytes], fail_load_for: set[str] | None = None):
+    events: list[tuple[str, str]] = []
+    keys = list(pages)
+    current = {}
+
+    def read(key: str) -> bytes:
+        current["key"] = key
+        return pages[key]
+
+    def load(matches: list[dict], players: list[dict]) -> None:
+        if current["key"] in (fail_load_for or set()):
+            raise RuntimeError("db down")
+        events.append(("load", current["key"]))
+
+    def mark(key: str) -> None:
+        events.append(("mark", key))
+
+    return steam_summary.load_pages_isolated(keys, read, load, mark), events
+
+
+def test_load_pages_isolated_loads_and_marks_all() -> None:
+    pages = {f"steam_raw/seq_{i}.json.gz": _gz(PAGE) for i in (1, 2, 3)}
+    (loaded, failed), events = _run(pages)
+    assert loaded == list(pages) and failed == {}
+    assert [e for e in events if e[0] == "mark"] == [("mark", k) for k in pages]
+
+
+def test_bad_middle_page_does_not_stop_later_pages() -> None:
+    pages = {"steam_raw/seq_1.json.gz": _gz(PAGE), "steam_raw/seq_2.json.gz": b"not gzip",
+             "steam_raw/seq_3.json.gz": _gz(PAGE)}
+    (loaded, failed), events = _run(pages)
+    assert loaded == ["steam_raw/seq_1.json.gz", "steam_raw/seq_3.json.gz"]
+    assert list(failed) == ["steam_raw/seq_2.json.gz"] and failed["steam_raw/seq_2.json.gz"]
+    assert ("mark", "steam_raw/seq_3.json.gz") in events
+
+
+def test_failed_load_is_not_marked() -> None:
+    pages = {"steam_raw/seq_1.json.gz": _gz(PAGE), "steam_raw/seq_2.json.gz": _gz(PAGE)}
+    (loaded, failed), events = _run(pages, fail_load_for={"steam_raw/seq_1.json.gz"})
+    assert "RuntimeError" in failed["steam_raw/seq_1.json.gz"]
+    assert ("mark", "steam_raw/seq_1.json.gz") not in events
+    assert loaded == ["steam_raw/seq_2.json.gz"]
+
+
+def test_marker_written_only_after_load_returns() -> None:
+    pages = {"steam_raw/seq_1.json.gz": _gz(PAGE)}
+    _, events = _run(pages)
+    assert events == [("load", "steam_raw/seq_1.json.gz"), ("mark", "steam_raw/seq_1.json.gz")]

@@ -9,11 +9,17 @@ load commits. A page that died before its marker is loaded again, which is safe 
 is idempotent (delete the batch's matches, insert, one transaction). Pages go in sequence order so
 the later page wins where pages overlap. It emits STEAM_LOADED when at least one page was loaded.
 
-Needs the warehouse Postgres (WAREHOUSE_* env vars) and the DDL file warehouse/init/04_steam_tables.sql;
-the Airflow container must mount it (default location is the repo's warehouse/init, override with
-STEAM_DDL_PATH).
+A page that fails (corrupt file, database error) is logged, left unmarked and retried next run; it
+does not block the pages after it. The run still ends failed so the alert callbacks fire.
 
-  find_pages -> load_pages (per page: read -> gunzip -> parse_page -> load_steam -> marker) -> STEAM_LOADED
+Needs the warehouse Postgres (WAREHOUSE_* env vars) and the DDL file warehouse/init/04_steam_tables.sql,
+mounted into the Airflow services by docker-compose.warehouse.yml (./warehouse/init at
+/opt/airflow/warehouse/init; override the path with STEAM_DDL_PATH). Without the mount the load task
+fails on every run.
+
+  find_pages -> load_pages (DDL read, then per page: read -> gunzip -> parse -> load_steam -> marker)
+             -> emit_loaded (outlet STEAM_LOADED; skipped when nothing loaded)
+             -> report_failures (fails the run if any page failed; runs even when nothing loaded)
 """
 
 import os
@@ -21,7 +27,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow.sdk import dag, task
-from airflow.sdk.exceptions import AirflowSkipException
+from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import STEAM_LOADED
@@ -49,27 +55,41 @@ def steam_summary_elt():
         print(f"{len(pending)} Steam pages unloaded; loading {min(len(pending), BATCH)} this run")
         return pending[:BATCH]
 
-    @task(outlets=[STEAM_LOADED])
-    def load_pages(page_keys: list[str]) -> int:
-        import gzip
-        import json
-
+    @task
+    def load_pages(page_keys: list[str]) -> dict:
         from dota import steam_summary, storage, warehouse
 
-        if not page_keys:
-            raise AirflowSkipException("no unloaded Steam pages")  # a skipped task emits no asset event
+        if not DDL_PATH.is_file():  # not a per-page failure: fail the task outright
+            raise FileNotFoundError(
+                f"{DDL_PATH} not found: mount ./warehouse/init at /opt/airflow/warehouse/init "
+                "(docker-compose.warehouse.yml) or set STEAM_DDL_PATH")
         ddl = DDL_PATH.read_text()
+        if not page_keys:
+            return {"loaded": [], "failed": {}}
         conn = warehouse.connect()
         try:
-            for key in page_keys:  # in order: the later page wins on overlap
-                matches, players = steam_summary.parse_page(json.loads(gzip.decompress(storage.read(key))))
-                steam_summary.load_steam(matches, players, conn, ddl=ddl)
-                storage.put(steam_summary.loaded_marker_key(key))  # only after the load committed
+            loaded, failed = steam_summary.load_pages_isolated(
+                page_keys, storage.read,
+                lambda matches, players: steam_summary.load_steam(matches, players, conn, ddl=ddl),
+                lambda key: storage.put(steam_summary.loaded_marker_key(key)))
         finally:
             conn.close()
-        return len(page_keys)
+        return {"loaded": loaded, "failed": failed}
 
-    load_pages(find_pages())
+    @task(outlets=[STEAM_LOADED])
+    def emit_loaded(result: dict) -> int:
+        if not result["loaded"]:
+            raise AirflowSkipException("no Steam pages loaded")  # a skipped task emits no asset event
+        return len(result["loaded"])
+
+    @task(trigger_rule="all_done")
+    def report_failures(result: dict) -> None:
+        if result["failed"]:
+            raise AirflowFailException(f"{len(result['failed'])} Steam pages failed: {result['failed']}")
+
+    result = load_pages(find_pages())
+    emit_loaded(result)
+    report_failures(result)
 
 
 steam_summary_elt()

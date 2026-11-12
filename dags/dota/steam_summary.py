@@ -3,7 +3,10 @@ under steam_raw/) into rows for stg.steam_matches and stg.steam_players. Flatten
 filtering and no business rules, those live in dbt. Loading goes through a
 caller-supplied DB connection."""
 
+import gzip
+import json
 import re
+from typing import Callable
 
 RAW_PREFIX = "steam_raw/"
 LOADED_PREFIX = "steam_raw/_loaded/"  # one empty marker per page, written after that page's load commits
@@ -76,3 +79,24 @@ def unloaded_pages(page_keys: list[str], loaded_keys: list[str]) -> list[str]:
     pages = [(int(m.group(1)), k) for k in page_keys
              if (m := _PAGE.match(k)) and loaded_marker_key(k) not in done]
     return [k for _, k in sorted(pages)]
+
+
+def load_pages_isolated(page_keys: list[str], read: Callable[[str], bytes],
+                        load: Callable[[list[dict], list[dict]], object],
+                        mark: Callable[[str], None]) -> tuple[list[str], dict[str, str]]:
+    """Loads each page in order: read -> gunzip -> parse_page -> load, then mark it loaded (only after
+    `load` returned). One page failing does not stop the others. Returns (loaded keys, {failed key:
+    error text}); a failed page is left unmarked so the next run retries it."""
+    loaded: list[str] = []
+    failed: dict[str, str] = {}
+    for key in page_keys:
+        try:
+            matches, players = parse_page(json.loads(gzip.decompress(read(key))))
+            load(matches, players)
+            mark(key)
+        except Exception as err:  # system boundary: one bad page (corrupt file, DB error) must not block the lane
+            print(f"page {key} failed: {type(err).__name__}: {err}")
+            failed[key] = f"{type(err).__name__}: {err}"
+        else:
+            loaded.append(key)
+    return loaded, failed
