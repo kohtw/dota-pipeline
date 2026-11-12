@@ -26,22 +26,22 @@ def call(method: str, *, sleep: Callable[[float], None] = time.sleep, **params) 
     # requests errors carry the full URL with the key, so messages are redacted and raised
     # from None to keep the original out of the traceback
     for attempt in range(STEAM_ATTEMPTS):
-        if attempt:
-            sleep(wait)
-        # Valve throttles in short windows; these waits (15, 30, 60, 120 s) follow the downloader's tested settings
+        # Valve throttles for minutes at a time, so waits grow from 15 s to 120 s
         wait = min(15 * 2 ** attempt, 120)
         try:
             r = requests.get(f"{API}/{method}/v1/", params={"key": os.environ["STEAM_API_KEY"], **params}, timeout=60)
         except requests.RequestException as e:
             problem = redact(str(e))
-            continue
-        if r.ok:
-            return r.json()["result"]
-        problem = redact(f"HTTP {r.status_code} {r.reason}")
-        if not is_transient_status(r.status_code):
-            raise PermanentError(f"Steam {method} failed: {problem}") from None
-        if (seconds := _retry_after(r)) is not None:
-            wait = max(seconds, wait) if r.status_code == 429 else seconds
+        else:
+            if r.ok:
+                return r.json()["result"]
+            problem = redact(f"HTTP {r.status_code} {r.reason}")
+            if not is_transient_status(r.status_code):
+                raise PermanentError(f"Steam {method} failed: {problem}") from None
+            if (seconds := _retry_after(r)) is not None:
+                wait = max(seconds, wait) if r.status_code == 429 else seconds
+        if attempt < STEAM_ATTEMPTS - 1:
+            sleep(wait)
     raise RuntimeError(f"Steam {method} failed after {STEAM_ATTEMPTS} attempts: {problem}") from None
 
 

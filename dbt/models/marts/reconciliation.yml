@@ -1,7 +1,7 @@
 version: 2
 models:
   - name: steam_replay_reconciliation
-    description: "One player of one match that is in both match_scoreboard and stg.steam_players: hero and final K/D/A from the replay next to Valve's match summary, plus K/D/A counted from death events. Matches the clean job rejected are not in the warehouse; scripts/reconcile_steam_replay.py covers those from the parsed files."
+    description: "One player of one match that is in both match_scoreboard and stg.steam_players: hero and final K/D/A from the replay next to Valve's match summary, plus K/D/A counted from death events. Matches the clean job rejected are not in the warehouse; scripts/reconcile_steam_replay.py covers those from the parsed files. The mart is empty until a match both passes clean and has a Steam row, so replay_scoreboard_matches_steam checks nothing until then."
     columns:
       - name: match_id
       - name: player_slot

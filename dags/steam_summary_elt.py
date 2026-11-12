@@ -1,6 +1,7 @@
 """
-Steam load: flatten the raw Steam pages that the daily download saved in Garage (steam_raw/) and
-load them into the warehouse tables stg.steam_matches / stg.steam_players / stg.steam_picks_bans.
+Steam load: flatten the raw Steam pages that steam_fetch and the daily download saved in Garage
+(steam_raw/) and load them into the warehouse tables stg.steam_matches / stg.steam_players /
+stg.steam_picks_bans.
 Python only flattens and inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
 Each match row records its page key (source_page) and load time (loaded_at). See docs/steam-lane.md.
 
@@ -27,10 +28,8 @@ Without the mount the load task fails on every run.
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import dag, task
+from airflow.sdk import AssetOrTimeSchedule, CronTriggerTimetable, dag, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
-from airflow.timetables.assets import AssetOrTimeSchedule
-from airflow.timetables.trigger import CronTriggerTimetable
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import STEAM_LOADED, STEAM_RAW

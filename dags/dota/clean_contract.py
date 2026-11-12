@@ -103,10 +103,9 @@ def _complete_ids(keys: list[str], prefix: str) -> set[int]:
 def uncleaned(parsed_complete_keys: list[str], clean_complete_keys: list[str],
               rejected_keys: list[str] | tuple[str, ...] = (),
               failed_keys: list[str] | tuple[str, ...] = ()) -> list[int]:
-    """Match ids that finished parsing but have no clean _complete marker and are not quarantined,
-    newest first. A clean run that died halfway wrote no marker, so it counts as uncleaned and runs
-    again, until it has failed in attempts.MAX_ATTEMPTS runs; a match the clean job rejected has a
-    _rejected marker and is left out until that marker is deleted."""
+    """Match ids that finished parsing but have no clean _complete marker, newest first. Left out:
+    matches with a _rejected marker, and matches whose clean crashed in attempts.MAX_ATTEMPTS runs.
+    Deleting the marker or the failure keys makes a match eligible again."""
     return sorted(_complete_ids(parsed_complete_keys, PARSED_COMPLETE)
                   - _complete_ids(clean_complete_keys, f"clean/{COMPLETE}")
                   - _complete_ids(list(rejected_keys), f"clean/{REJECTED}")

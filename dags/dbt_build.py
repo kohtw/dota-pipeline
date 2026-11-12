@@ -1,9 +1,9 @@
 """
 dbt stage: build the marts schema from the warehouse `clean` schema with `dbt build`.
 
-Asset-triggered: it runs whenever the load DAG produces CLEAN_LOADED (fresh rows in the warehouse
-`clean` schema), so the marts refresh follows the load without polling on a timer. This is the last
-stage of the chain:
+Asset-triggered: it runs whenever a load produces CLEAN_LOADED (fresh rows in the warehouse `clean`
+schema) or STEAM_LOADED (fresh stg.steam_* rows), so the marts refresh follows the load without
+polling on a timer. This is the last stage of the chain:
 
   parse -> RAW_PARSED -> clean -> CLEAN_READY -> load -> CLEAN_LOADED -> dbt_build (here)
 

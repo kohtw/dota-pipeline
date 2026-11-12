@@ -112,10 +112,9 @@ def unloaded_pages(page_keys: list[str], loaded_keys: list[str]) -> list[str]:
 def load_pages_isolated(page_keys: list[str], read: Callable[[str], bytes],
                         load: Callable[..., object],
                         mark: Callable[[str], None]) -> tuple[list[str], dict[str, str]]:
-    """Loads each page in order: read -> gunzip -> parse -> load(matches, players, picks_bans=...,
-    source_page=key), then mark it loaded (only after `load` returned). One page failing does not
-    stop the others. Returns (loaded keys, {failed key: error text}); a failed page is left unmarked
-    so the next run retries it."""
+    """Load each page in order (read, gunzip, parse, load), and mark it only after `load` returns.
+    A failed page is left unmarked for the next run and does not stop the others.
+    Returns (loaded keys, {failed key: error text})."""
     loaded: list[str] = []
     failed: dict[str, str] = {}
     for key in page_keys:

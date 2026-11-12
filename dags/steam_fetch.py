@@ -4,7 +4,8 @@ which wakes steam_summary_elt to load them.
 
 The Variable steam_fetch_pages_per_run sets the pages of 100 matches per run (default 10). Each run
 starts that many pages behind the newest seq num, so samples spread across hours instead of walking
-a bookmark that falls further behind. The DAG starts paused.
+a bookmark that falls further behind. More than 50 pages per run outpaces the load
+(steam_summary_elt takes BATCH=50 pages per run). The DAG starts paused.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -29,7 +30,7 @@ PAGES_VAR = "steam_fetch_pages_per_run"
     tags=["orchestration"],
 )
 def steam_fetch():
-    # 40 pages take about 2 min; 30 min allows many retried calls and still ends before the next hourly run
+    # 40 pages take about 3 min; 30 min allows many retried calls and still ends before the next hourly run
     @task(pool="steam_api", execution_timeout=timedelta(minutes=30), outlets=[STEAM_RAW], **API_RETRY)
     def fetch() -> int:
         from dota import steam, steam_summary, storage
