@@ -13,3 +13,5 @@ models:
     marts:
       +schema: marts          # exact schema name, see macros/generate_schema_name.sql
       +materialized: table
+    staging:
+      +materialized: view     # no +schema: lands in the target schema, like the seeds
