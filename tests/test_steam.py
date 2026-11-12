@@ -1,4 +1,8 @@
+import pytest
+import requests
+
 from dota import steam
+from dota.errors import PermanentError
 
 
 def pages(*page_list):
@@ -50,14 +54,84 @@ def test_default_max_pages_is_the_module_constant(monkeypatch):
 
 
 def test_http_error_message_does_not_contain_the_api_key(monkeypatch):
-    import pytest
-
     class Resp:
         ok, status_code, reason = False, 403, "Forbidden"
 
     monkeypatch.setenv("STEAM_API_KEY", "SECRET123")
     monkeypatch.setattr(steam.requests, "get", lambda *a, **k: Resp())
-    with pytest.raises(RuntimeError) as err:
+    with pytest.raises(PermanentError) as err:
         steam.call("GetMatchHistory", matches_requested=1)
     assert "SECRET123" not in str(err.value)
     assert "403" in str(err.value)
+
+
+class Resp:
+    def __init__(self, status, result=None, headers=None):
+        self.status_code, self.ok, self.reason = status, status < 400, "Reason"
+        self.headers = headers or {}
+        self._result = result
+
+    def json(self):
+        return {"result": self._result}
+
+
+def responses(monkeypatch, *outcomes):
+    """Fake requests.get returning (or raising) the outcomes in order; returns the call log."""
+    it = iter(outcomes)
+    calls = []
+
+    def get(*a, **k):
+        calls.append(k.get("params"))
+        outcome = next(it)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setenv("STEAM_API_KEY", "SECRET123")
+    monkeypatch.setattr(steam.requests, "get", get)
+    return calls
+
+
+def test_connection_error_message_does_not_contain_the_api_key(monkeypatch):
+    url = "https://api.steampowered.com/IDOTA2Match_570/GetMatchHistory/v1/?key=SECRET123&x=1"
+    responses(monkeypatch, *[requests.ConnectionError(f"Max retries exceeded with url: {url}")] * steam.STEAM_ATTEMPTS)
+    with pytest.raises(RuntimeError) as err:
+        steam.call("GetMatchHistory", sleep=lambda s: None, matches_requested=1)
+    assert "SECRET123" not in str(err.value)
+    assert err.value.__cause__ is None
+    assert err.value.__suppress_context__
+
+
+def test_429_then_ok_retries_and_returns_result(monkeypatch):
+    calls = responses(monkeypatch, Resp(429), Resp(200, {"matches": []}))
+    slept = []
+    assert steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1) == {"matches": []}
+    assert len(calls) == 2
+    assert slept == [1]
+
+
+def test_5xx_exhausts_attempts_then_raises_runtime_error(monkeypatch):
+    calls = responses(monkeypatch, *[Resp(503)] * steam.STEAM_ATTEMPTS)
+    slept = []
+    with pytest.raises(RuntimeError) as err:
+        steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
+    assert not isinstance(err.value, PermanentError)
+    assert len(calls) == 4
+    assert slept == [1, 2, 4]
+
+
+def test_403_raises_permanent_error_without_retry(monkeypatch):
+    calls = responses(monkeypatch, Resp(403), Resp(200, {}))
+    slept = []
+    with pytest.raises(PermanentError):
+        steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_retry_after_header_is_honoured_up_to_60s(monkeypatch):
+    responses(monkeypatch, Resp(429, headers={"Retry-After": "7"}), Resp(429, headers={"Retry-After": "120"}),
+              Resp(200, {}))
+    slept = []
+    steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
+    assert slept == [7, 2]

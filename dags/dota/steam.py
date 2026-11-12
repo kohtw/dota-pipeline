@@ -1,22 +1,47 @@
 """Valve Steam Web API (needs STEAM_API_KEY)."""
 
 import os
+import time
 from typing import Callable
 
 import requests
+
+from dota.errors import PermanentError, is_transient_status, redact
 
 API = "https://api.steampowered.com/IDOTA2Match_570"
 ALL_PICK = 22  # game_mode; Turbo is 23
 RANKED = 7  # lobby_type
 MAX_PAGES = 20  # ceiling, not a target: the loop stops once it has n ids (usually ~2 pages of 100 matches)
+STEAM_ATTEMPTS = 4
 
 
-def call(method: str, **params) -> dict:
-    r = requests.get(f"{API}/{method}/v1/", params={"key": os.environ["STEAM_API_KEY"], **params}, timeout=60)
-    if not r.ok:
-        # not raise_for_status(): its message holds the full URL, which carries the API key into task logs
-        raise RuntimeError(f"Steam {method} failed: HTTP {r.status_code} {r.reason}")
-    return r.json()["result"]
+def _retry_after(r: requests.Response) -> int | None:
+    value = r.headers.get("Retry-After", "")
+    return int(value) if value.isdecimal() and int(value) <= 60 else None
+
+
+def call(method: str, *, sleep: Callable[[float], None] = time.sleep, **params) -> dict:
+    """Call a Steam method, retrying 429, 5xx and network errors with backoff. Other 4xx
+    raise PermanentError."""
+    # requests errors carry the full URL with the key, so messages are redacted and raised
+    # from None to keep the original out of the traceback
+    for attempt in range(STEAM_ATTEMPTS):
+        if attempt:
+            sleep(wait)
+        wait = min(2 ** attempt, 30)
+        try:
+            r = requests.get(f"{API}/{method}/v1/", params={"key": os.environ["STEAM_API_KEY"], **params}, timeout=60)
+        except requests.RequestException as e:
+            problem = redact(str(e))
+            continue
+        if r.ok:
+            return r.json()["result"]
+        problem = redact(f"HTTP {r.status_code} {r.reason}")
+        if not is_transient_status(r.status_code):
+            raise PermanentError(f"Steam {method} failed: {problem}") from None
+        if (seconds := _retry_after(r)) is not None:
+            wait = seconds
+    raise RuntimeError(f"Steam {method} failed after {STEAM_ATTEMPTS} attempts: {problem}") from None
 
 
 def newest_seq() -> int:
