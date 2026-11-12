@@ -170,3 +170,19 @@ def test_failure_rolls_back_and_raises():
 def test_empty_batch_loads_nothing_and_inserts_nothing():
     n, conn, inserts = run_load([], [])
     assert n == 0 and inserts == []
+
+
+def test_unloaded_pages_skips_loaded_and_sorts() -> None:
+    page_keys = ["steam_raw/seq_30.json.gz", "steam_raw/seq_10.json.gz", "steam_raw/seq_20.json.gz",
+                 "steam_raw/_loaded/seq_10.json.gz"]
+    loaded = ["steam_raw/_loaded/seq_10.json.gz"]
+    assert steam_summary.unloaded_pages(page_keys, loaded) == ["steam_raw/seq_20.json.gz", "steam_raw/seq_30.json.gz"]
+
+
+def test_unloaded_pages_orders_by_sequence_number_not_text() -> None:
+    keys = ["steam_raw/seq_9.json.gz", "steam_raw/seq_100.json.gz"]
+    assert steam_summary.unloaded_pages(keys, []) == keys
+
+
+def test_loaded_marker_key_uses_page_basename() -> None:
+    assert steam_summary.loaded_marker_key("steam_raw/seq_10.json.gz") == "steam_raw/_loaded/seq_10.json.gz"

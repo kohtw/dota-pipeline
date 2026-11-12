@@ -3,6 +3,12 @@ under steam_raw/) into rows for stg.steam_matches and stg.steam_players. Flatten
 filtering and no business rules, those live in dbt. Loading goes through a
 caller-supplied DB connection."""
 
+import re
+
+RAW_PREFIX = "steam_raw/"
+LOADED_PREFIX = "steam_raw/_loaded/"  # one empty marker per page, written after that page's load commits
+_PAGE = re.compile(r"^steam_raw/seq_(\d+)\.json\.gz$")
+
 MATCH_COLUMNS = ("match_id", "match_seq_num", "start_time", "duration", "game_mode",
                  "lobby_type", "radiant_win", "human_players")
 PLAYER_COLUMNS = ("player_slot", "hero_id", "kills", "deaths", "assists", "leaver_status")
@@ -56,3 +62,17 @@ def load_steam(matches: list[dict], players: list[dict], conn, *, ddl: str,
         raise
     finally:
         cur.close()
+
+
+def loaded_marker_key(page_key: str) -> str:
+    """Marker key for a page: steam_raw/_loaded/{page_basename}."""
+    return LOADED_PREFIX + page_key.rsplit("/", 1)[-1]
+
+
+def unloaded_pages(page_keys: list[str], loaded_keys: list[str]) -> list[str]:
+    """Page keys (steam_raw/seq_N.json.gz) with no loaded marker, ordered by seq number so that
+    on overlapping pages the later one wins. Other keys under steam_raw/ (markers) are ignored."""
+    done = set(loaded_keys)
+    pages = [(int(m.group(1)), k) for k in page_keys
+             if (m := _PAGE.match(k)) and loaded_marker_key(k) not in done]
+    return [k for _, k in sorted(pages)]
