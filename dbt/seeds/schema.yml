@@ -1,0 +1,15 @@
+# Static reference data from OpenDota constants. Refresh with scripts/refresh_constants.py.
+version: 2
+seeds:
+  - name: dim_heroes
+    description: "One row per Dota 2 hero. Join on npc_name (matches the clean hero_name), not hero_id."
+    columns:
+      - name: hero_id
+        data_tests: [unique, not_null]
+      - name: npc_name
+        data_tests: [not_null]
+  - name: dim_game_modes
+    description: "One row per Dota 2 game mode id, with a readable label."
+    columns:
+      - name: game_mode_id
+        data_tests: [unique, not_null]
