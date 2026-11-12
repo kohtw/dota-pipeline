@@ -14,27 +14,25 @@ does not block the pages after it. The run still ends failed so the alert callba
 
 Needs the warehouse Postgres (WAREHOUSE_* env vars) and the DDL file warehouse/init/04_steam_tables.sql,
 mounted into the Airflow services by docker-compose.yml (./warehouse/init at
-/opt/airflow/warehouse/init; override the path with STEAM_DDL_PATH). Without the mount the load task
-fails on every run.
+/opt/airflow/warehouse/init; dota.config.WAREHOUSE_INIT_DIR, override with the env var of that name).
+Without the mount the load task fails on every run.
 
   find_pages -> load_pages (DDL read, then per page: read -> gunzip -> parse -> load_steam -> marker)
              -> emit_loaded (outlet STEAM_LOADED; skipped when nothing loaded)
              -> report_failures (fails the run if any page failed; runs even when nothing loaded)
 """
 
-import os
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from airflow.sdk import dag, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import STEAM_LOADED
+from dota.config import WAREHOUSE_INIT_DIR
 
 BATCH = 20  # pages per run; the rest wait for the next run
-DDL_PATH = Path(os.environ.get(
-    "STEAM_DDL_PATH", Path(__file__).resolve().parents[1] / "warehouse" / "init" / "04_steam_tables.sql"))
+DDL_PATH = WAREHOUSE_INIT_DIR / "04_steam_tables.sql"
 
 
 @dag(
@@ -62,7 +60,7 @@ def steam_summary_elt():
         if not DDL_PATH.is_file():  # not a per-page failure: fail the task outright
             raise FileNotFoundError(
                 f"{DDL_PATH} not found: mount ./warehouse/init at /opt/airflow/warehouse/init "
-                "(docker-compose.yml) or set STEAM_DDL_PATH")
+                "(docker-compose.yml) or set WAREHOUSE_INIT_DIR")
         ddl = DDL_PATH.read_text()
         if not page_keys:
             return {"loaded": [], "failed": {}}
