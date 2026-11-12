@@ -19,7 +19,8 @@ Without the mount the load task fails on every run.
 
   find_pages -> load_pages (DDL read, then per page: read -> gunzip -> parse -> load_steam -> marker)
              -> emit_loaded (outlet STEAM_LOADED; skipped when nothing loaded)
-             -> report_failures (fails the run if any page failed; runs even when nothing loaded)
+             -> report_failures (fails the run if any page failed; runs even when nothing loaded or when
+                 load_pages itself failed, which it leaves to that task's own failure)
 """
 
 from datetime import datetime, timedelta
@@ -81,9 +82,13 @@ def steam_summary_elt():
         return len(result["loaded"])
 
     @task(trigger_rule="all_done")
-    def report_failures(result: dict) -> None:
-        if result["failed"]:
-            raise AirflowFailException(f"{len(result['failed'])} Steam pages failed: {result['failed']}")
+    def report_failures(result: dict | None) -> None:
+        from dota import steam_summary
+
+        # result is None when load_pages itself failed; that failure already fails the run
+        message = steam_summary.failure_message(result)
+        if message:
+            raise AirflowFailException(message)
 
     result = load_pages(find_pages())
     emit_loaded(result)

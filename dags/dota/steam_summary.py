@@ -100,3 +100,11 @@ def load_pages_isolated(page_keys: list[str], read: Callable[[str], bytes],
         else:
             loaded.append(key)
     return loaded, failed
+
+
+def failure_message(result: dict | None) -> str | None:
+    """The error to raise for a load_pages result, or None when there is nothing to report. A None
+    result means load_pages itself failed: its own failure already fails the run and alerts."""
+    if not result or not result["failed"]:
+        return None
+    return f"{len(result['failed'])} Steam pages failed: {result['failed']}"

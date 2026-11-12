@@ -242,3 +242,16 @@ def test_marker_written_only_after_load_returns() -> None:
     pages = {"steam_raw/seq_1.json.gz": _gz(PAGE)}
     _, events = _run(pages)
     assert events == [("load", "steam_raw/seq_1.json.gz"), ("mark", "steam_raw/seq_1.json.gz")]
+
+
+def test_failure_message_is_none_when_load_pages_gave_no_result() -> None:
+    assert steam_summary.failure_message(None) is None
+
+
+def test_failure_message_is_none_when_no_page_failed() -> None:
+    assert steam_summary.failure_message({"loaded": ["a"], "failed": {}}) is None
+
+
+def test_failure_message_names_the_failed_pages() -> None:
+    msg = steam_summary.failure_message({"loaded": [], "failed": {"steam_raw/seq_2.json.gz": "boom"}})
+    assert msg is not None and msg.startswith("1 Steam pages failed") and "seq_2" in msg
