@@ -19,6 +19,13 @@ MATCH_COLUMNS = ("match_id", "match_seq_num", "start_time", "duration", "game_mo
 PLAYER_COLUMNS = ("player_slot", "hero_id", "kills", "deaths", "assists", "leaver_status")
 
 
+def save_page(start_seq: int, page: dict, put: Callable[[str, bytes], None]) -> str:
+    """Write one raw page gzipped to steam_raw/seq_{start_seq}.json.gz and return the key."""
+    key = f"{RAW_PREFIX}seq_{start_seq}.json.gz"
+    put(key, gzip.compress(json.dumps(page).encode()))
+    return key
+
+
 def parse_page(page: dict) -> tuple[list[dict], list[dict]]:
     """One match row per match and one player row per listed player. Missing fields become None."""
     matches, players = [], []

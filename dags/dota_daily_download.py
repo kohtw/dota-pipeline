@@ -8,13 +8,12 @@ ended ~24h ago: every game length is included and replays are ready.
 The first run only saves the bookmark.
 """
 
-import gzip
-import json
 from datetime import datetime, timedelta, timezone
 
 from airflow.sdk import Variable, dag, task
 
 from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
+from dota.assets import STEAM_RAW
 from dota.config import API_RETRY
 
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
@@ -33,12 +32,12 @@ PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages pe
 )
 def dota_daily_download():
     # an hour fits 20 pages plus newest_seq even if every call times out twice before it succeeds
-    @task(pool="steam_api", execution_timeout=timedelta(hours=1), **API_RETRY)
+    @task(pool="steam_api", execution_timeout=timedelta(hours=1), outlets=[STEAM_RAW], **API_RETRY)
     def get_matches() -> list[int]:
-        from dota import steam, storage
+        from dota import steam, steam_summary, storage
 
         def save_page(start_seq: int, page: dict) -> None:
-            storage.put(f"steam_raw/seq_{start_seq}.json.gz", gzip.compress(json.dumps(page).encode()))
+            steam_summary.save_page(start_seq, page, storage.put)
 
         bookmark = Variable.get(BOOKMARK, default=None)
         pages = int(Variable.get(PAGES_VAR, default=steam.MAX_PAGES))

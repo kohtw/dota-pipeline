@@ -53,6 +53,31 @@ def test_default_max_pages_is_the_module_constant(monkeypatch):
     assert len(calls) == steam.MAX_PAGES
 
 
+def test_fetch_pages_saves_contiguous_pages_and_sleeps_between_calls(monkeypatch):
+    p1 = {"matches": [match(100), match(105)]}
+    p2 = {"matches": [match(106), match(110)]}
+    p3 = {"matches": [match(111)]}
+    fake, calls = pages(p1, p2, p3)
+    monkeypatch.setattr(steam, "call", fake)
+    saved, slept = [], []
+    n = steam.fetch_pages(100, 3, lambda s, r: saved.append((s, r)), sleep=slept.append, pace_s=0.5)
+    assert n == 3
+    assert saved == [(100, p1), (106, p2), (111, p3)]
+    assert [c["start_at_match_seq_num"] for c in calls] == [100, 106, 111]
+    assert all(c["matches_requested"] == 100 for c in calls)
+    assert slept == [0.5, 0.5]
+
+
+def test_fetch_pages_stops_on_an_empty_page_without_saving_it(monkeypatch):
+    fake, calls = pages({"matches": [match(1)]}, {"matches": []}, {"matches": [match(5)]})
+    monkeypatch.setattr(steam, "call", fake)
+    saved, slept = [], []
+    assert steam.fetch_pages(1, 5, lambda s, r: saved.append(s), sleep=slept.append) == 1
+    assert saved == [1]
+    assert len(calls) == 2
+    assert slept == [1.0]
+
+
 def test_http_error_message_does_not_contain_the_api_key(monkeypatch):
     class Resp:
         ok, status_code, reason = False, 403, "Forbidden"

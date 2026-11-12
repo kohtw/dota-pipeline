@@ -3,7 +3,8 @@ Steam load: flatten the raw Steam pages that the daily download saved in Garage 
 load them into the warehouse tables stg.steam_matches / stg.steam_players. Python only flattens and
 inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
 
-Runs daily (no asset trigger). Like the other sweeps it works from what is in Garage: a page is
+Runs when new pages land (STEAM_RAW, from steam_fetch and the daily download) and daily at
+17:00 UTC. Like the other sweeps it works from what is in Garage: a page is
 skipped only once its steam_raw/_loaded/ marker exists, and the marker is written AFTER that page's
 load commits. A page that died before its marker is loaded again, which is safe because load_steam
 is idempotent (delete the batch's matches, insert, one transaction). Pages go in sequence order so
@@ -27,9 +28,11 @@ from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
+from airflow.timetables.assets import AssetOrTimeSchedule
+from airflow.timetables.trigger import CronTriggerTimetable
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import STEAM_LOADED
+from dota.assets import STEAM_LOADED, STEAM_RAW
 from dota.config import WAREHOUSE_INIT_DIR
 
 BATCH = 20  # pages per run; the rest wait for the next run
@@ -37,7 +40,7 @@ DDL_PATH = WAREHOUSE_INIT_DIR / "04_steam_tables.sql"
 
 
 @dag(
-    schedule="@daily",
+    schedule=AssetOrTimeSchedule(timetable=CronTriggerTimetable("0 17 * * *", timezone="UTC"), assets=STEAM_RAW),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

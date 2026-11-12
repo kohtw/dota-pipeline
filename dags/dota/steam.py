@@ -64,3 +64,20 @@ def ranked_all_pick_from(seq: int, n: int, save_page: Callable[[int, dict], None
             break
         seq = matches[-1]["match_seq_num"] + 1
     return ids[:n]
+
+
+def fetch_pages(start_seq: int, pages: int, save_page: Callable[[int, dict], None], *,
+                sleep: Callable[[float], None] = time.sleep, pace_s: float = 1.0) -> int:
+    """Fetch up to `pages` contiguous pages of 100 matches from start_seq and save each. Stops at
+    the first empty page. Returns the number of pages saved."""
+    seq = start_seq
+    for n in range(pages):
+        if n:
+            sleep(pace_s)
+        page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
+        matches = page["matches"]
+        if not matches:
+            return n
+        save_page(seq, page)
+        seq = matches[-1]["match_seq_num"] + 1
+    return pages

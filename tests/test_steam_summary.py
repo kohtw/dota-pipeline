@@ -1,3 +1,4 @@
+import gzip
 import json
 from pathlib import Path
 
@@ -255,3 +256,11 @@ def test_failure_message_is_none_when_no_page_failed() -> None:
 def test_failure_message_names_the_failed_pages() -> None:
     msg = steam_summary.failure_message({"loaded": [], "failed": {"steam_raw/seq_2.json.gz": "boom"}})
     assert msg is not None and msg.startswith("1 Steam pages failed") and "seq_2" in msg
+
+
+def test_save_page_writes_gzipped_json_under_the_key_the_loader_reads():
+    written = {}
+    key = steam_summary.save_page(123, PAGE, lambda k, body: written.update({k: body}))
+    assert key == "steam_raw/seq_123.json.gz"
+    assert json.loads(gzip.decompress(written[key])) == PAGE
+    assert steam_summary.unloaded_pages([key], []) == [key]
