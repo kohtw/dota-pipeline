@@ -10,6 +10,7 @@ import re
 from typing import Callable
 
 COMPLETE = "_complete"  # marker dataset, written after all tables
+REJECTED = "_rejected"  # quarantine marker dataset: clean/_rejected/match_id={id}/_REJECTED
 PARSED_COMPLETE = "parsed/_complete"  # the raw-layer marker (see contract.py)
 
 # Required columns only: the contract allows new columns, so extra ones are fine.
@@ -88,11 +89,21 @@ def _complete_ids(keys: list[str], prefix: str) -> set[int]:
     return ids
 
 
-def uncleaned(parsed_complete_keys: list[str], clean_complete_keys: list[str]) -> list[int]:
-    """Match ids that finished parsing but have no clean _complete marker, newest first. A clean
-    run that died halfway wrote no marker, so it counts as uncleaned and runs again."""
+def uncleaned(parsed_complete_keys: list[str], clean_complete_keys: list[str],
+              rejected_keys: list[str] | tuple[str, ...] = ()) -> list[int]:
+    """Match ids that finished parsing but have no clean _complete marker and are not quarantined,
+    newest first. A clean run that died halfway wrote no marker, so it counts as uncleaned and runs
+    again; a match the clean job rejected has a _rejected marker and is left out until that marker
+    is deleted."""
     return sorted(_complete_ids(parsed_complete_keys, PARSED_COMPLETE)
-                  - _complete_ids(clean_complete_keys, f"clean/{COMPLETE}"), reverse=True)
+                  - _complete_ids(clean_complete_keys, f"clean/{COMPLETE}")
+                  - _complete_ids(list(rejected_keys), f"clean/{REJECTED}"), reverse=True)
+
+
+def is_rejected(report: dict) -> bool:
+    """True when the clean job's report.json shows a blocking rejection: not complete, not a
+    preview run, and at least one error."""
+    return not report.get("complete") and not report.get("preview") and bool(report.get("errors"))
 
 
 def check_parsed(match_id: int, read: Callable[[str], bytes],
