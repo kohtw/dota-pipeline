@@ -13,7 +13,7 @@ A page that fails (corrupt file, database error) is logged, left unmarked and re
 does not block the pages after it. The run still ends failed so the alert callbacks fire.
 
 Needs the warehouse Postgres (WAREHOUSE_* env vars) and the DDL file warehouse/init/04_steam_tables.sql,
-mounted into the Airflow services by docker-compose.warehouse.yml (./warehouse/init at
+mounted into the Airflow services by docker-compose.yml (./warehouse/init at
 /opt/airflow/warehouse/init; override the path with STEAM_DDL_PATH). Without the mount the load task
 fails on every run.
 
@@ -62,7 +62,7 @@ def steam_summary_elt():
         if not DDL_PATH.is_file():  # not a per-page failure: fail the task outright
             raise FileNotFoundError(
                 f"{DDL_PATH} not found: mount ./warehouse/init at /opt/airflow/warehouse/init "
-                "(docker-compose.warehouse.yml) or set STEAM_DDL_PATH")
+                "(docker-compose.yml) or set STEAM_DDL_PATH")
         ddl = DDL_PATH.read_text()
         if not page_keys:
             return {"loaded": [], "failed": {}}
