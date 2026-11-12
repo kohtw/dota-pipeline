@@ -1,59 +1,88 @@
-"""Route between the match scoreboard and an individual participant's view."""
+"""Route between hero statistics, match scoreboards and individual player views."""
 
 from collections import Counter
-from os import getenv
-from pathlib import Path
 
 import streamlit as st
 
-from components import render_match_header, render_team_scoreboard
+from components import render_match_header, render_team_scoreboard, style_sidebar_navigation
+from config import DashboardConfigurationError, WarehouseConfig, load_warehouse_config
 from dashboard_db import (
     DashboardDatabaseError,
+    load_available_matches,
     load_default_match_id,
+    load_hero_statistics,
     load_player_damage,
     load_player_snapshots,
     load_scoreboard,
 )
 from player import render_player_page
+from hero_stats import render_hero_statistics
+from match_search import render_match_examples, render_match_search
 
 
-# The repo's fixture path identifies which database gets the fictional-data label.
-DEV_DATABASE_PATH = Path(__file__).resolve().parents[1] / "output" / "dashboard-dev.duckdb"
+VIEW_LABELS = {"heroes": "Hero statistics", "matches": "Match analysis"}
+
+
+def switch_view() -> None:
+    """Write the selected section to the URL and remove the other section's selection."""
+    view = st.session_state["dashboard_view"]
+    st.query_params["view"] = view
+    unrelated = ("match_id", "player_slot") if view == "heroes" else ("hero_id",)
+    for key in unrelated:
+        if key in st.query_params:
+            del st.query_params[key]
+
+
+def open_match(match_id: int) -> None:
+    """Route to a match scoreboard without retaining a player or aggregate-hero selection."""
+    st.query_params["view"] = "matches"
+    st.query_params["match_id"] = str(match_id)
+    for key in ("player_slot", "hero_id"):
+        if key in st.query_params:
+            del st.query_params[key]
 
 
 def return_to_scoreboard(match_id: int) -> None:
-    """Keep match context in the URL while removing the player selection."""
-    # A button callback updates the URL before Streamlit reruns the application,
-    # allowing the router to render the scoreboard immediately.
-    st.query_params["match_id"] = str(match_id)
-    if "player_slot" in st.query_params:
-        del st.query_params["player_slot"]
+    """Open an available scoreboard and align the search field with its match."""
+    # Navigation callbacks run before the form is created, so its input can be updated safely.
+    st.session_state["match_search_input"] = str(match_id)
+    open_match(match_id)
 
 
-def show_navigation_error(message: str, match_id: int) -> None:
-    """Explain an invalid link and provide a route to the available scoreboard."""
+def show_navigation_error(message: str, match_id: int | None) -> None:
+    """Explain a navigation failure and offer an available scoreboard when present."""
     st.error(message)
-    st.button(
-        "Back to scoreboard", on_click=return_to_scoreboard,
-        args=(match_id,), key="invalid_link_back",
-    )
+    if match_id is not None:
+        st.button(
+            "Back to scoreboard", on_click=return_to_scoreboard,
+            args=(match_id,), key="invalid_link_back",
+        )
 
 
-def main() -> None:
-    """Validate match and participant identity before rendering the selected view."""
-    # Give the scoreboard enough horizontal room for names, statistics, and items.
-    # Display functions receive records and do not need to know how they were loaded.
-    st.set_page_config(page_title="Dota 2 Match Analysis", layout="wide")
-    database_path = getenv("DUCKDB_PATH")
-    if not database_path:
-        st.error("Set `DUCKDB_PATH` to your dbt-built DuckDB file and restart Streamlit.")
-        return
+def render_match_analysis(config: WarehouseConfig) -> None:
+    """Load and validate replay data only when the match section is selected."""
+    submitted, match_id = render_match_search()
+    if submitted:
+        if match_id is None:
+            # Invalid input must not leave the previous match visible as an apparent search result.
+            return
+        open_match(match_id)
+        # The new run follows the canonical URL and loads the requested scoreboard once.
+        st.rerun()
     try:
-        default_match_id = load_default_match_id(database_path)
+        default_match_id = load_default_match_id(config)
     except DashboardDatabaseError as error:
         st.error(str(error))
         return
-    if default_match_id is None:
+    if default_match_id is not None:
+        try:
+            examples = load_available_matches(config)
+        except DashboardDatabaseError:
+            # Examples are a convenience; their failure must not block a known match or search.
+            st.warning("Available examples could not be loaded. You can still search for a match.")
+        else:
+            render_match_examples(examples, return_to_scoreboard)
+    if default_match_id is None and "match_id" not in st.query_params:
         st.info("No matches are available in the scoreboard mart.")
         return
 
@@ -71,13 +100,23 @@ def main() -> None:
         show_navigation_error("The match ID in this link is outside the supported range.", default_match_id)
         return
 
+    if default_match_id is None:
+        show_navigation_error(
+            f"Match {requested_match} is not available in this dashboard. No analysed matches are currently available.",
+            None,
+        )
+        return
+
     try:
-        match, players = load_scoreboard(database_path, requested_match)
+        match, players = load_scoreboard(config, requested_match)
     except DashboardDatabaseError as error:
         st.error(str(error))
         return
     if not players:
-        show_navigation_error("The match requested in this link is not available.", default_match_id)
+        show_navigation_error(
+            f"Match {requested_match} is not available in this dashboard. Enter another match ID or choose an available example.",
+            default_match_id,
+        )
         return
 
     # Reject inconsistent identities before displaying any statistics so the page
@@ -95,9 +134,6 @@ def main() -> None:
     if any(player.get("team") not in (2, 3) for player in players):
         st.error("Cannot display the scoreboard: a participant has an invalid team.")
         return
-
-    if Path(database_path).resolve() == DEV_DATABASE_PATH:
-        st.info("Development database — this match and its statistics are fictional.")
 
     # Route from the URL rather than a second selection in Session State, so a
     # refreshed or bookmarked link always identifies the same participant.
@@ -148,7 +184,7 @@ def main() -> None:
         )
         other_slot = comparison_player["slot"] if comparison_player is not None else None
         try:
-            snapshots_by_slot = load_player_snapshots(database_path, requested_match, requested_slot, other_slot)
+            snapshots_by_slot = load_player_snapshots(config, requested_match, requested_slot, other_slot)
         except DashboardDatabaseError as error:
             st.error(str(error))
             return
@@ -156,7 +192,7 @@ def main() -> None:
         # Hero damage is an optional section with its own data query.
         damage_by_slot = None
         try:
-            damage_by_slot = load_player_damage(database_path, requested_match, requested_slot, other_slot)
+            damage_by_slot = load_player_damage(config, requested_match, requested_slot, other_slot)
         except DashboardDatabaseError as error:
             st.error(str(error))
 
@@ -174,7 +210,7 @@ def main() -> None:
     # Missing optional statistics are formatted by the components rather than
     # rejected here, allowing incomplete records to remain visible and honest.
     render_match_header(match)
-    st.caption("Select a hero or player name to open their individual match analysis.")
+    st.caption("Select a hero to open their individual match analysis.")
     st.divider()
 
     # Both teams use the same renderer so their column layouts and formatting
@@ -183,6 +219,46 @@ def main() -> None:
     dire_players = [player for player in players if player["team"] == 3]
     render_team_scoreboard("Radiant", radiant_players)
     render_team_scoreboard("Dire", dire_players)
+
+
+def main() -> None:
+    """Configure the app and route each section independently of the replay dataset."""
+    st.set_page_config(page_title="Dota 2 Analytics", layout="wide")
+    # Existing match/player links keep their original route; a new visit opens hero statistics.
+    default_view = "matches" if any(key in st.query_params for key in ("match_id", "player_slot")) else "heroes"
+    requested_view = st.query_params.get("view", default_view)
+    view = requested_view if requested_view in VIEW_LABELS else default_view
+
+    # The URL owns routing, including links opened after a previous widget interaction.
+    st.session_state["dashboard_view"] = view
+    style_sidebar_navigation()
+    with st.sidebar.container(key="dashboard_navigation"):
+        st.header("Explore")
+        st.radio(
+            "Explore", options=list(VIEW_LABELS), format_func=VIEW_LABELS.__getitem__,
+            index=None, key="dashboard_view", on_change=switch_view, label_visibility="collapsed",
+        )
+    if len(st.query_params.get_all("view")) > 1 or requested_view not in VIEW_LABELS:
+        st.error("This link contains an invalid dashboard section. Choose a section from the navigation.")
+        return
+
+    try:
+        # Resolve shared settings without querying either section's marts during startup.
+        config = load_warehouse_config()
+    except DashboardConfigurationError as error:
+        st.error(str(error))
+        return
+
+    if view == "heroes":
+        try:
+            heroes = load_hero_statistics(config)
+        except DashboardDatabaseError as error:
+            st.title("Hero statistics")
+            st.error(str(error))
+            return
+        render_hero_statistics(heroes)
+        return
+    render_match_analysis(config)
 
 
 # Importing the module exposes main without starting the interface; Streamlit's

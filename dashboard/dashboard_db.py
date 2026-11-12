@@ -1,73 +1,96 @@
-"""Load dashboard records from the local DuckDB marts."""
+"""Load hero summaries and match records from the Postgres dashboard marts."""
 
-from contextlib import contextmanager
 from math import isfinite
-from pathlib import Path
+
+from config import WarehouseConfig
+from postgres_connection import DashboardDatabaseError, open_postgres_database
 
 
-class DashboardDatabaseError(Exception):
-    """The configured dashboard database is unavailable or incomplete."""
-
-
-@contextmanager
-def _open_dashboard_database(database_path: str):
-    """Open the database read-only and translate errors for the UI."""
-    path = Path(database_path)
-    if not path.is_file():
-        raise DashboardDatabaseError(
-            f"Database file not found at {path}. Build the fixture database or correct DUCKDB_PATH."
+def load_hero_statistics(config: WarehouseConfig) -> list[dict]:
+    """Read one row per observed hero, retaining the mart's dataset-wide denominator."""
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT hero_id, localized_name, picks, wins, ranked_matches, pick_rate, win_rate
+            FROM marts.hero_pick_win_rate
+            ORDER BY picks DESC, hero_id
+            """
         )
+        rows = cursor.fetchall()
 
-    try:
-        import duckdb
-    except ImportError as error:
-        raise DashboardDatabaseError(
-            "Install DuckDB in the Python environment running Streamlit with `python -m pip install duckdb`."
-        ) from error
+    heroes = []
+    hero_ids = set()
+    match_counts = set()
+    for hero_id, name, picks, wins, total, pick_rate, win_rate in rows:
+        # Counts must be usable before deriving losses or comparing sample sizes.
+        valid_counts = all(type(value) is int for value in (hero_id, picks, wins, total))
+        if not valid_counts or hero_id <= 0 or not 0 <= wins <= picks <= total or picks == 0:
+            raise DashboardDatabaseError("The hero statistics mart contains invalid hero IDs or counts.")
+        if hero_id in hero_ids:
+            raise DashboardDatabaseError("The hero statistics mart contains duplicate hero IDs.")
+        hero_ids.add(hero_id)
+        match_counts.add(total)
+        # Missing names keep their identity; an unobserved hero is never fabricated as a zero-rate row.
+        label = name.strip() if isinstance(name, str) and name.strip() else f"Hero {hero_id}"
+        heroes.append({
+            "hero_id": hero_id, "hero_label": label,
+            "picks": picks, "wins": wins, "losses": picks - wins, "ranked_matches": total,
+            "pick_rate": pick_rate if pick_rate is not None and isfinite(pick_rate) and 0 <= pick_rate <= 1 else None,
+            "win_rate": win_rate if win_rate is not None and isfinite(win_rate) and 0 <= win_rate <= 1 else None,
+        })
 
-    try:
-        with duckdb.connect(str(path), read_only=True) as connection:
-            yield connection
-    except duckdb.CatalogException as error:
-        raise DashboardDatabaseError(
-            "The database is missing dashboard marts. Run `dbt build --project-dir dbt --profiles-dir dbt` "
-            "with DUCKDB_PATH pointing to this file."
-        ) from error
-    except duckdb.Error as error:
-        raise DashboardDatabaseError(
-            "Could not read the DuckDB database. Check DUCKDB_PATH and make sure dbt has finished building it."
-        ) from error
+    # Every row repeats the same match count. Summing it would multiply the dataset size by its heroes.
+    if len(match_counts) > 1:
+        raise DashboardDatabaseError("The hero statistics mart contains inconsistent match totals.")
+    return heroes
 
 
-def load_default_match_id(database_path: str) -> int | None:
+def load_default_match_id(config: WarehouseConfig) -> int | None:
     """Select a deterministic default from the available scoreboard matches."""
-    with _open_dashboard_database(database_path) as connection:
-        return connection.execute("SELECT min(match_id) FROM marts.match_scoreboard").fetchone()[0]
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT min(match_id) FROM marts.match_scoreboard")
+        return cursor.fetchone()[0]
 
 
-def load_scoreboard(database_path: str, match_id: int) -> tuple[dict, list[dict]]:
+def load_available_matches(config: WarehouseConfig) -> list[int]:
+    """Return a small, deterministic set of match IDs already present in the scoreboard."""
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        # The scoreboard has one row per player; DISTINCT prevents repeated example buttons.
+        cursor.execute(
+            """
+            SELECT DISTINCT match_id
+            FROM marts.match_scoreboard
+            ORDER BY match_id
+            LIMIT 5
+            """
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
+def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[dict]]:
     """Return the match header and player rows from the same mart query."""
-    with _open_dashboard_database(database_path) as connection:
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
         # Check that the progression mart is queryable without fetching any rows.
-        connection.execute("SELECT 1 FROM marts.player_timeseries LIMIT 0")
+        cursor.execute("SELECT 1 FROM marts.player_timeseries LIMIT 0")
         # The left join keeps every scoreboard player, with NULL KP when no row matches.
-        result = connection.execute(
+        cursor.execute(
             """
             SELECT s.match_id, s.player_slot AS slot, s.hero_name AS hero, s.team,
                    s.kills, s.deaths, s.assists, s.last_hits, s.denies, s.net_worth,
                    s.unspent_gold AS gold, s.final_items, s.duration_s, s.won,
-                   kp.kill_participation, kp.team_kills,
+                   kp.kill_participation, CAST(kp.team_kills AS BIGINT) AS team_kills,
                    kp.kills_from_events + kp.assists_from_events AS kill_involvements
             FROM marts.match_scoreboard AS s
             LEFT JOIN marts.kill_participation AS kp
               ON kp.match_id = s.match_id AND kp.player_slot = s.player_slot
-            WHERE s.match_id = ?
+            WHERE s.match_id = %s
             ORDER BY s.player_slot
             """,
-            [match_id],
+            (match_id,),
         )
-        columns = [column[0] for column in result.description]
-        rows = result.fetchall()
+        # Postgres SUM(bigint) returns numeric; team kill counts are exposed above as integers.
+        columns = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
 
     players = []
     durations = set()
@@ -83,9 +106,9 @@ def load_scoreboard(database_path: str, match_id: int) -> tuple[dict, list[dict]
             losing_teams.add(player["team"])
         player["hero_label"] = player["hero"].removeprefix("npc_dota_hero_").replace("_", " ").title()
         final_items = player.pop("final_items")
-        player["active_items"] = None
+        player["main_inventory"] = None
         if final_items is not None:
-            player["active_items"] = [
+            player["main_inventory"] = [
                 item.removeprefix("item_").replace("_", " ").title()
                 for item in final_items.split(",") if item
             ]
@@ -105,20 +128,21 @@ def load_scoreboard(database_path: str, match_id: int) -> tuple[dict, list[dict]
 
 
 def load_player_snapshots(
-    database_path: str, match_id: int, player_slot: int, comparison_slot: int | None,
+    config: WarehouseConfig, match_id: int, player_slot: int, comparison_slot: int | None,
 ) -> dict[int, list[dict]]:
     """Load ordered progression records for the selected slots in one match."""
     # With no comparison, the second SQL parameter is NULL and only the selected slot matches.
-    with _open_dashboard_database(database_path) as connection:
-        rows = connection.execute(
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
             """
             SELECT player_slot, game_time_s, net_worth, total_earned_xp
             FROM marts.player_timeseries
-            WHERE match_id = ? AND player_slot IN (?, ?)
+            WHERE match_id = %s AND player_slot IN (%s, %s)
             ORDER BY player_slot, game_time_s, tick
             """,
-            [match_id, player_slot, comparison_slot],
-        ).fetchall()
+            (match_id, player_slot, comparison_slot),
+        )
+        rows = cursor.fetchall()
 
     snapshots = {}
     for slot, time, net_worth, total_xp in rows:
@@ -131,20 +155,21 @@ def load_player_snapshots(
 
 
 def load_player_damage(
-    database_path: str, match_id: int, player_slot: int, comparison_slot: int | None,
+    config: WarehouseConfig, match_id: int, player_slot: int, comparison_slot: int | None,
 ) -> dict[int, list[dict]]:
     """Load full-match damage rows for the selected attackers."""
-    with _open_dashboard_database(database_path) as connection:
-        rows = connection.execute(
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
             """
             SELECT attacker_slot, target_slot, target_team, inflictor_name,
                    total_damage, hits, share_of_team_damage
             FROM marts.damage_by_pair
-            WHERE match_id = ? AND attacker_slot IN (?, ?)
+            WHERE match_id = %s AND attacker_slot IN (%s, %s)
             ORDER BY attacker_slot, total_damage DESC, target_slot, inflictor_name
             """,
-            [match_id, player_slot, comparison_slot],
-        ).fetchall()
+            (match_id, player_slot, comparison_slot),
+        )
+        rows = cursor.fetchall()
 
     damage = {}
     for attacker, target, team, source, total, hits, share in rows:
