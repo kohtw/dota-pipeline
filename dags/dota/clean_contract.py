@@ -9,6 +9,8 @@ import io
 import re
 from typing import Callable
 
+from dota import attempts
+
 COMPLETE = "_complete"  # marker dataset, written after all tables
 REJECTED = "_rejected"  # quarantine marker dataset: clean/_rejected/match_id={id}/_REJECTED
 PARSED_COMPLETE = "parsed/_complete"  # the raw-layer marker (see contract.py)
@@ -99,14 +101,16 @@ def _complete_ids(keys: list[str], prefix: str) -> set[int]:
 
 
 def uncleaned(parsed_complete_keys: list[str], clean_complete_keys: list[str],
-              rejected_keys: list[str] | tuple[str, ...] = ()) -> list[int]:
+              rejected_keys: list[str] | tuple[str, ...] = (),
+              failed_keys: list[str] | tuple[str, ...] = ()) -> list[int]:
     """Match ids that finished parsing but have no clean _complete marker and are not quarantined,
     newest first. A clean run that died halfway wrote no marker, so it counts as uncleaned and runs
-    again; a match the clean job rejected has a _rejected marker and is left out until that marker
-    is deleted."""
+    again, until it has failed in attempts.MAX_ATTEMPTS runs; a match the clean job rejected has a
+    _rejected marker and is left out until that marker is deleted."""
     return sorted(_complete_ids(parsed_complete_keys, PARSED_COMPLETE)
                   - _complete_ids(clean_complete_keys, f"clean/{COMPLETE}")
-                  - _complete_ids(list(rejected_keys), f"clean/{REJECTED}"), reverse=True)
+                  - _complete_ids(list(rejected_keys), f"clean/{REJECTED}")
+                  - attempts.exhausted(list(failed_keys), "clean"), reverse=True)
 
 
 def is_rejected(report: dict) -> bool:

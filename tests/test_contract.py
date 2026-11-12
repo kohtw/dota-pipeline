@@ -83,3 +83,14 @@ def test_unparsed_finds_replays_without_complete_marker_newest_first():
     replays = ["replays/1.dem", "replays/2.dem", "replays/3.dem", "replays/notes.txt"]
     parsed = ["parsed/_complete/match_id=1/part-0.parquet", "parsed/heroes/match_id=2/part-0.parquet"]
     assert contract.unparsed(replays, parsed) == [3, 2]
+
+
+def test_unparsed_skips_exhausted_replays_but_keeps_two_failures():
+    from dota import attempts
+
+    replays = ["replays/1.dem", "replays/2.dem", "replays/3.dem"]
+    runs = [f"scheduled__2026-11-12T0{h}:00:00+00:00" for h in range(3)]
+    failed = [attempts.failure_key("parsed", 1, r) for r in runs]
+    failed += [attempts.failure_key("parsed", 2, r) for r in runs[:2]]
+    failed += [attempts.failure_key("clean", 3, r) for r in runs]
+    assert contract.unparsed(replays, [], failed) == [3, 2]

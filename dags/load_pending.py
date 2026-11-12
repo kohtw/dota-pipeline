@@ -1,11 +1,11 @@
 """
 Load sweep: load every cleaned match's Parquet from Garage into Postgres schema `clean`.
 
-Asset-triggered: it runs whenever clean_pending produces CLEAN_READY. Like the other sweeps it
-works from what is in Garage, not from which run put it there: a match is skipped only once its
-clean/_loaded marker exists, and that marker is written AFTER the match's DB load commits. A load
-that died before the marker runs again, which is safe because load_match is idempotent (delete
-the match's rows, insert, one transaction).
+It runs whenever clean_pending produces CLEAN_READY, and at :45 past every hour as a fallback for
+a missed trigger. Like the other sweeps it works from what is in Garage, not from which run put it
+there: a match is skipped only once its clean/_loaded marker exists, and that marker is written
+AFTER the match's DB load commits. A load that died before the marker runs again, which is safe
+because load_match is idempotent (delete the match's rows, insert, one transaction).
 
 Needs the warehouse Postgres (the `warehouse` service in docker-compose; WAREHOUSE_* env vars).
 
@@ -18,7 +18,8 @@ only if retention.eligible: the match is loaded and its clean output re-passes t
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import Variable, dag, get_current_context, task, task_group
+from airflow.sdk import (AssetOrTimeSchedule, CronTriggerTimetable, Variable, dag, get_current_context,
+                        task, task_group)
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, CLEAN_READY
@@ -30,7 +31,8 @@ MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can'
 
 
 @dag(
-    schedule=[CLEAN_READY],
+    schedule=AssetOrTimeSchedule(timetable=CronTriggerTimetable("45 * * * *", timezone="UTC"),
+                                 assets=CLEAN_READY),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

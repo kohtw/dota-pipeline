@@ -6,6 +6,8 @@ It works from what is in Garage, not from which DAG put it there, so it picks up
 dota_daily_download, a manual upload, or a bulk import alike. A replay is only skipped once its
 parsed/_complete marker exists (written after all tables), so re-running parses nothing twice and
 a half-finished parse runs again.
+A replay whose parse failed in 3 runs (counted by record_parse_failure under
+parsed/_failed/match_id={id}/) is skipped; delete those keys to retry it.
 
   find_unparsed -> parse_and_check (one per match: parse_replay -> check_contract) -> RAW_PARSED
 
@@ -41,10 +43,11 @@ PARSE_LABEL = "{{ task.command[0].rsplit('/', 1)[-1].removesuffix('.dem') }}"  #
 def parse_pending():
     @task
     def find_unparsed() -> list[int]:
-        from dota import contract, storage
+        from dota import attempts, contract, storage
 
         pending = contract.unparsed(storage.list_keys("replays/"),
-                                    storage.list_keys(f"parsed/{contract.COMPLETE}/"))
+                                    storage.list_keys(f"parsed/{contract.COMPLETE}/"),
+                                    storage.list_keys(f"parsed/{attempts.FAILED}/"))
         print(f"{len(pending)} replays unparsed; parsing {min(len(pending), BATCH)} this run")
         return pending[:BATCH]
 
@@ -79,7 +82,22 @@ def parse_pending():
 
             return contract.check_parsed(match_id, storage.read, storage.list_keys)
 
-        parse >> check_contract(match_id)
+        # Runs after parse_replay succeeds or fails, and decides from Garage: a run that left no
+        # _complete marker counts as one failed attempt, however many times it was retried.
+        @task(trigger_rule="all_done", map_index_template=MATCH_LABEL)
+        def record_parse_failure(match_id: int) -> bool:
+            from dota import attempts, contract, storage
+
+            context = get_current_context()
+            context["match_label"] = str(match_id)
+            if storage.list_keys(contract.partition_prefix(contract.COMPLETE, match_id)):
+                return False
+            key = attempts.failure_key("parsed", match_id, context["run_id"])
+            storage.put(key)
+            print(f"match {match_id} did not parse; recorded {key}")
+            return True
+
+        parse >> [check_contract(match_id), record_parse_failure(match_id)]
 
     parse_and_check.expand(match_id=find_unparsed())
 
