@@ -93,7 +93,7 @@ services:
   garage:
     build: ./garage
     ports:
-      - "3900:3900"  # S3 API
+      - "127.0.0.1:3900:3900"  # S3 API
     environment:
       <<: *s3-creds
       S3_BUCKETS: raw
@@ -108,7 +108,7 @@ services:
   garage-webui:
     image: khairul169/garage-webui:1.1.0
     ports:
-      - "3909:3909"
+      - "127.0.0.1:3909:3909"
     environment:
       API_BASE_URL: http://garage:3903  # admin API
       API_ADMIN_KEY: 31c4c6bee1bcba9d0f6f148e60b44c8c4a3e3481168d8d8f33408519ecd8c5e1  # = admin_token in garage.toml
@@ -127,7 +127,7 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       <<: *airflow-depends
       airflow-init:
