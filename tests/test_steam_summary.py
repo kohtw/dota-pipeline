@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from dota import steam_summary
 
 PAGE = json.loads((Path(__file__).parent / "fixtures" / "steam_page.json").read_text())
@@ -60,3 +62,111 @@ def test_missing_player_field_becomes_none():
 
 def test_page_without_matches_is_empty():
     assert steam_summary.parse_page({"status": 1}) == ([], [])
+
+
+class FakeCursor:
+    def __init__(self, log):
+        self.log = log
+
+    def execute(self, sql, params=None):
+        self.log.append(("execute", sql, params))
+
+    def close(self):
+        self.log.append(("close",))
+
+
+class FakeConn:
+    def __init__(self):
+        self.log = []
+
+    def cursor(self):
+        return FakeCursor(self.log)
+
+    def commit(self):
+        self.log.append(("commit",))
+
+    def rollback(self):
+        self.log.append(("rollback",))
+
+
+DDL = "CREATE SCHEMA IF NOT EXISTS stg; -- fake ddl"
+
+
+def run_load(matches, players, conn=None):
+    conn = conn or FakeConn()
+    inserts = []
+    n = steam_summary.load_steam(matches, players, conn, ddl=DDL,
+                                 execute_values=lambda cur, sql, rows: (
+                                     inserts.append((sql, rows)), conn.log.append(("insert", sql))))
+    return n, conn, inserts
+
+
+def steam_rows():
+    return steam_summary.parse_page(PAGE)
+
+
+def test_ddl_runs_before_any_delete():
+    matches, players = steam_rows()
+    _, conn, _ = run_load(matches, players)
+    stmts = [e for e in conn.log if e[0] in ("execute", "insert")]
+    assert stmts[0] == ("execute", DDL, None)
+    assert all("DELETE" in e[1] for e in stmts[1:3])
+
+
+def test_delete_then_insert_in_one_commit_and_returns_match_count():
+    matches, players = steam_rows()
+    n, conn, inserts = run_load(matches, players)
+    assert n == 5
+    kinds = [e[0] if e[0] != "execute" else e[1].split()[0] for e in conn.log]
+    assert kinds == ["CREATE", "DELETE", "DELETE", "insert", "insert", "commit", "close"]
+    deletes = [e for e in conn.log if e[0] == "execute" and e[1].startswith("DELETE")]
+    assert {d[1] for d in deletes} == {"DELETE FROM stg.steam_players WHERE match_id = ANY(%s)",
+                                       "DELETE FROM stg.steam_matches WHERE match_id = ANY(%s)"}
+    assert all(sorted(d[2][0]) == sorted(m["match_id"] for m in matches) for d in deletes)
+    assert len(inserts[0][1]) == 5 and len(inserts[1][1]) == 48
+    assert inserts[0][0].startswith("INSERT INTO stg.steam_matches (match_id, match_seq_num")
+
+
+def test_duplicate_match_in_a_batch_inserts_once_with_later_values():
+    matches, players = steam_rows()
+    later = {**matches[0], "duration": 1234}
+    n, _, inserts = run_load(matches + [later], players)
+    assert n == 5
+    rows = inserts[0][1]
+    assert len(rows) == 5
+    (row,) = [r for r in rows if r[0] == matches[0]["match_id"]]
+    assert 1234 in row
+
+
+def test_duplicate_player_in_a_batch_inserts_once_with_later_values():
+    matches, players = steam_rows()
+    later = {**players[0], "kills": 99}
+    _, _, inserts = run_load(matches, players + [later])
+    rows = inserts[1][1]
+    assert len(rows) == 48
+    (row,) = [r for r in rows if r[:2] == (players[0]["match_id"], players[0]["player_slot"])]
+    assert 99 in row
+
+
+def test_second_call_with_same_batch_issues_same_statements():
+    matches, players = steam_rows()
+    _, first, _ = run_load(matches, players)
+    _, second, _ = run_load(matches, players)
+    assert first.log == second.log
+
+
+def test_failure_rolls_back_and_raises():
+    matches, players = steam_rows()
+    conn = FakeConn()
+
+    def boom(cur, sql, rows):
+        raise RuntimeError("db down")
+
+    with pytest.raises(RuntimeError):
+        steam_summary.load_steam(matches, players, conn, ddl=DDL, execute_values=boom)
+    assert ("rollback",) in conn.log and ("commit",) not in conn.log
+
+
+def test_empty_batch_loads_nothing_and_inserts_nothing():
+    n, conn, inserts = run_load([], [])
+    assert n == 0 and inserts == []
