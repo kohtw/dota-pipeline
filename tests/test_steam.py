@@ -47,3 +47,17 @@ def test_default_max_pages_is_the_module_constant(monkeypatch):
     monkeypatch.setattr(steam, "call", fake)
     steam.ranked_all_pick_from(1, 50)
     assert len(calls) == steam.MAX_PAGES
+
+
+def test_http_error_message_does_not_contain_the_api_key(monkeypatch):
+    import pytest
+
+    class Resp:
+        ok, status_code, reason = False, 403, "Forbidden"
+
+    monkeypatch.setenv("STEAM_API_KEY", "SECRET123")
+    monkeypatch.setattr(steam.requests, "get", lambda *a, **k: Resp())
+    with pytest.raises(RuntimeError) as err:
+        steam.call("GetMatchHistory", matches_requested=1)
+    assert "SECRET123" not in str(err.value)
+    assert "403" in str(err.value)

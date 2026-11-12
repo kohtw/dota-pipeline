@@ -13,7 +13,9 @@ MAX_PAGES = 20  # ceiling, not a target: the loop stops once it has n ids (usual
 
 def call(method: str, **params) -> dict:
     r = requests.get(f"{API}/{method}/v1/", params={"key": os.environ["STEAM_API_KEY"], **params}, timeout=60)
-    r.raise_for_status()
+    if not r.ok:
+        # not raise_for_status(): its message holds the full URL, which carries the API key into task logs
+        raise RuntimeError(f"Steam {method} failed: HTTP {r.status_code} {r.reason}")
     return r.json()["result"]
 
 
