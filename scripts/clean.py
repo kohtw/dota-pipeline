@@ -1,5 +1,5 @@
 """
-Clean one match: raw/parsed/{match_id}/* -> clean/{table}/match_id={match_id}/part.parquet
+Clean one match: raw/parsed/{table}/match_id={match_id}/ -> clean/{table}/match_id={match_id}/part.parquet
 
 Stub: the clean tables aren't agreed yet. See docs/data-contract.md for the raw inputs.
 """

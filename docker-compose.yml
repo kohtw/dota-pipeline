@@ -1,5 +1,5 @@
 # Local Airflow for the replay DAG.
-#   docker build -t dota-parser parser
+#   docker build -t dota-parser -f parser/Dockerfile .
 #   docker compose up --build
 # UI: http://localhost:8080 (no login)
 # S3 (Garage): http://localhost:3900 (API only; browse via garage-webui at http://localhost:3909), region us-east-1, path-style; creds below (dev only)
@@ -56,7 +56,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
-  # data lake (S3-compatible): raw/replays/{match_id}.dem, raw/parsed/{match_id}/*
+  # data lake (S3-compatible): raw/replays/{match_id}.dem, raw/parsed/{table}/match_id={match_id}/*.parquet
   garage:
     build: ./garage
     ports:

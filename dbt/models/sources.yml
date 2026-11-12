@@ -1,0 +1,15 @@
+# The clean tables loaded into Postgres schema "clean" (grain and keys: docs/clean-contract.md).
+version: 2
+sources:
+  - name: clean
+    schema: clean
+    tables:
+      - name: matches
+      - name: players
+      - name: player_stats
+      - name: positions
+      - name: damage_events
+      - name: deaths
+      - name: death_assists
+      - name: purchases
+      - name: final_inventory

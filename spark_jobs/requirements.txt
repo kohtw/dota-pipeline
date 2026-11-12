@@ -1,0 +1,1 @@
+pyspark==4.0.1  # must match the Spark version in parser/build.gradle.kts

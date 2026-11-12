@@ -1,78 +1,85 @@
-import json
+import io
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from dota import contract
 
 MATCH = 9079737909
-PLAYERS = [{"slot": i, "hero": f"npc_dota_hero_{i}", "team": 2 if i < 5 else 3} for i in range(10)]
+ONE_ROW = {"tick": [30], "handle": [1], "class": ["C"], "event": ["created"], "index": [0], "idx": [0],
+           "name": ["x"], "type": ["DOTA_COMBATLOG_DAMAGE"], "timestamp": [3.3]}
 
 
-def match_json(**overrides) -> str:
-    data = {"match_id": MATCH, "game_mode": 22, "winner": 2, "end_time": 1, "game_start_tick": 900,
-            "game_start_time": 30.0, "players": PLAYERS}
-    return json.dumps({**data, **overrides})
+def table(name: str, **overrides) -> pa.Table:
+    """A valid one-partition table for `name` (all required columns), with column overrides."""
+    if name == "match":
+        cols = {"game_mode": [22], "game_winner": [2], "end_time": [1]}
+    elif name == "players":
+        cols = {"slot": list(range(10)), "hero_name": [f"npc_dota_hero_{i}" for i in range(10)],
+                "game_team": [2] * 5 + [3] * 5}
+    else:
+        cols = {c: ONE_ROW.get(c, [1]) for c in contract.REQUIRED_COLUMNS[name]}
+    return pa.table({**cols, **overrides})
 
 
-COMBATLOG = (
-    "match_id,tick,type,timestamp,attacker_name,target_name,inflictor_name,value,value_name,gold_reason\n"
-    f"{MATCH},100,DOTA_COMBATLOG_DAMAGE,3.3,npc_dota_hero_axe,npc_dota_hero_lina,,57,,\n"
-)
-POSITIONS = f"match_id,tick,hero,team,x,y\n{MATCH},30,npc_dota_hero_axe,2,-6000.5,-5800.0\n"
-NAMES = f"match_id,idx,name\n{MATCH},1,item_tango\n"
+def parquet(t: pa.Table) -> bytes:
+    buf = io.BytesIO()
+    pq.write_table(t, buf)
+    return buf.getvalue()
 
 
-def files(**overrides: str) -> dict[str, bytes]:
-    base = {"match.json": match_json(), "combatlog.csv": COMBATLOG, "positions.csv": POSITIONS, "names.csv": NAMES}
-    return {contract.parsed_key(MATCH, k): v.encode() for k, v in {**base, **overrides}.items()}
+def store(**tables: pa.Table | None) -> dict[str, bytes]:
+    """Object store for one match: every table + the _complete marker. None = table not written."""
+    all_tables = {name: table(name) for name in contract.REQUIRED_COLUMNS}
+    all_tables[contract.COMPLETE] = pa.table({"parsed_at": [1]})
+    all_tables.update(tables)
+    return {contract.partition_prefix(n, MATCH) + "part-00000.snappy.parquet": parquet(t)
+            for n, t in all_tables.items() if t is not None}
+
+
+def check(objects: dict[str, bytes]) -> dict[str, int]:
+    return contract.check_parsed(MATCH, objects.__getitem__,
+                                 lambda prefix: [k for k in objects if k.startswith(prefix)])
 
 
 def test_valid_output_passes_and_counts_rows():
-    store = files()
-    assert contract.check_parsed(MATCH, store.__getitem__) == \
-        {"combatlog.csv": 1, "positions.csv": 1, "names.csv": 1}
+    counts = check(store())
+    assert counts["players"] == 10 and counts["match"] == 1 and counts["heroes"] == 1
 
 
 def test_extra_columns_are_allowed():
-    assert contract.check_csv("combatlog.csv", COMBATLOG, MATCH) == 1  # has gold_reason
+    assert check(store(heroes=table("heroes", m_iHealth=[100])))["heroes"] == 1
 
 
 def test_missing_column_fails():
-    with pytest.raises(contract.ContractError, match=r"positions.csv: missing columns \['x'\]"):
-        contract.check_csv("positions.csv", f"match_id,tick,hero,team,y\n{MATCH},30,h,2,1\n", MATCH)
+    t = table("heroes").drop_columns(["CBodyComponent.m_vecX"])
+    with pytest.raises(contract.ContractError, match=r"heroes: missing columns \['CBodyComponent.m_vecX'\]"):
+        check(store(heroes=t))
 
 
-def test_wrong_match_id_rows_fail():
-    text = POSITIONS + "123,60,npc_dota_hero_axe,2,0,0\n"
-    with pytest.raises(contract.ContractError, match="1 of 2 rows"):
-        contract.check_csv("positions.csv", text, MATCH)
+def test_missing_marker_fails():
+    with pytest.raises(contract.ContractError, match="_complete marker"):
+        check(store(**{contract.COMPLETE: None}))
 
 
-def test_empty_combatlog_fails_but_empty_names_is_allowed():
-    with pytest.raises(contract.ContractError, match="no rows"):
-        contract.check_csv("combatlog.csv", COMBATLOG.splitlines()[0] + "\n", MATCH)
-    assert contract.check_csv("names.csv", "match_id,idx,name\n", MATCH) == 0
+def test_missing_table_fails_but_wards_may_be_empty():
+    with pytest.raises(contract.ContractError, match="combatlog: no data"):
+        check(store(combatlog=None))
+    assert check(store(wards=None))["wards"] == 0
 
 
-@pytest.mark.parametrize("overrides, message", [
-    ({"match_id": 1}, "match_id is 1"),
-    ({"winner": 0}, "winner is 0"),
-    ({"players": PLAYERS[:9]}, "9 players"),
-    ({"players": PLAYERS[:9] + [{"slot": 9, "hero": "x", "team": 4}]}, "bad player entry"),
+@pytest.mark.parametrize("name, overrides, message", [
+    ("match", {"game_winner": [0]}, "game_winner is 0"),
+    ("players", {"slot": [0] * 9, "hero_name": ["h"] * 9, "game_team": [2] * 9}, "9 players"),
+    ("players", {"game_team": [2] * 9 + [4]}, r"game_team values \[4\]"),
 ])
-def test_bad_match_json_fails(overrides: dict, message: str):
+def test_bad_match_or_players_fails(name: str, overrides: dict, message: str):
     with pytest.raises(contract.ContractError, match=message):
-        contract.check_match_json(match_json(**overrides), MATCH)
+        check(store(**{name: table(name, **overrides)}))
 
 
-def test_unparsed_finds_new_and_half_parsed_replays_newest_first():
+def test_unparsed_finds_replays_without_complete_marker_newest_first():
     replays = ["replays/1.dem", "replays/2.dem", "replays/3.dem", "replays/notes.txt"]
-    parsed = [f"parsed/1/{name}" for name in contract.PARSED_FILES] + ["parsed/2/match.json"]
+    parsed = ["parsed/_complete/match_id=1/part-0.parquet", "parsed/heroes/match_id=2/part-0.parquet"]
     assert contract.unparsed(replays, parsed) == [3, 2]
-
-
-def test_missing_match_json_field_fails():
-    data = json.loads(match_json())
-    del data["game_start_tick"]
-    with pytest.raises(contract.ContractError, match="game_start_tick"):
-        contract.check_match_json(json.dumps(data), MATCH)
