@@ -126,3 +126,10 @@ def test_rejected_marker_constant():
 ])
 def test_is_rejected(report, expected):
     assert cc.is_rejected(report) is expected
+
+
+def test_report_and_rejected_keys():
+    assert cc.report_key(5) == "clean/_review/match_id=5/report.json"
+    assert cc.rejected_key(5) == "clean/_rejected/match_id=5/_REJECTED"
+    # the rejected marker must be one that uncleaned() recognises
+    assert cc.uncleaned(["parsed/_complete/match_id=5/_SUCCESS"], [], [cc.rejected_key(5)]) == []

@@ -49,6 +49,15 @@ def complete_prefix(match_id: int) -> str:
     return clean_prefix(COMPLETE, match_id)
 
 
+def report_key(match_id: int) -> str:
+    """The clean job's per-match report (written by every run that reaches write_result)."""
+    return f"clean/_review/match_id={match_id}/report.json"
+
+
+def rejected_key(match_id: int) -> str:
+    return f"clean/{REJECTED}/match_id={match_id}/_REJECTED"
+
+
 def read_parquet(keys: list[str], read: Callable[[str], bytes]):
     """All part files of one partition as one pyarrow Table."""
     import pyarrow as pa
