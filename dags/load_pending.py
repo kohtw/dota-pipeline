@@ -7,8 +7,7 @@ clean/_loaded marker exists, and that marker is written AFTER the match's DB loa
 that died before the marker runs again, which is safe because load_match is idempotent (delete
 the match's rows, insert, one transaction).
 
-Needs the warehouse Postgres (WAREHOUSE_* env vars). It is not in docker-compose yet, so this
-DAG cannot run until that service exists -- expected, not a failure.
+Needs the warehouse Postgres (the `warehouse` service in docker-compose; WAREHOUSE_* env vars).
 
   find_unloaded -> load_and_retain (one per match: load_one -> retain_dem) -> CLEAN_LOADED
 

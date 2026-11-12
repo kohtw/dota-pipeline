@@ -28,7 +28,7 @@ from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, STEAM_LOADED
 from dota.config import WAREHOUSE_INIT_DIR
 
-# the dbt project + profiles live here inside the container; mounted by compose (Chris's area)
+# the dbt project + profiles live here inside the container; docker-compose mounts ./dbt there
 DBT_DIR = os.environ.get("DBT_DIR", "/opt/airflow/dbt")
 # keep dbt's writable output (compiled artifacts, run_results, logs) off the repo / read-only mount
 DBT_TARGET_PATH = "/data/dbt/target"

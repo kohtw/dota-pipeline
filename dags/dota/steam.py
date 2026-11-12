@@ -8,7 +8,7 @@ import requests
 API = "https://api.steampowered.com/IDOTA2Match_570"
 ALL_PICK = 22  # game_mode; Turbo is 23
 RANKED = 7  # lobby_type
-MAX_PAGES = 20  # safety cap, 100 matches per page
+MAX_PAGES = 20  # ceiling, not a target: the loop stops once it has n ids (usually ~2 pages of 100 matches)
 
 
 def call(method: str, **params) -> dict:

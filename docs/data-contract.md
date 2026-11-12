@@ -26,11 +26,24 @@ raw/                                                      bucket
   parsed/{table}/match_id={match_id}/part-*.parquet       one dataset per table below
   parsed/_complete/match_id={match_id}/part-*.parquet     marker: match_id, parsed_at (timestamp)
 clean/{table}/match_id={match_id}/part-*.parquet          (Spark clean jobs, TBD)
+clean/_rejected/match_id={match_id}/_REJECTED             marker: the clean job rejected this match
+steam_raw/seq_{start_seq}.json.gz                         one raw Steam match-history page
+steam_raw/_loaded/{page file name}                        marker: this page is loaded into the warehouse
 ```
 
 Writes are idempotent per match: re-parsing a match replaces only its `match_id=` partition in each table.
 
+`replays/{match_id}.dem` is deleted after a successful load when the Airflow Variable `dem_retention` is `delete` (default `keep`). Re-parsing a match then needs its replay downloaded again.
+
 `_complete` is written after every table, so a match is fully parsed only once its `_complete` partition exists. Downstream should read a match only then. A table with no rows for a match (e.g. `wards` when no ward was placed) has no partition for it. `dags/dota/contract.py` checks parsed output against this file.
+
+### Steam pages and markers
+
+| Path | Written by | Content |
+|---|---|---|
+| `steam_raw/seq_{start_seq}.json.gz` | `dota_daily_download` | One raw Steam match-history page: the API's `result` object, as gzipped JSON |
+| `steam_raw/_loaded/{page file name}` | `steam_summary_elt` | Empty marker, written after the page is loaded |
+| `clean/_rejected/match_id={id}/_REJECTED` | `clean_pending` | Empty marker, written when the clean job rejects the match. Deleting it makes the match eligible again |
 
 ## Tables
 

@@ -19,7 +19,7 @@ from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
 N_MATCHES = 50
 BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
-PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: Steam pages fetched per run
+PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages per run; the loop stops once it has N_MATCHES ids (usually ~2 pages)
 
 
 @dag(
