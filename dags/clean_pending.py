@@ -13,11 +13,19 @@ The clean container image `dota-spark-clean` is Maximus's (CONTRIBUTING.md §13)
 yet, so this DAG holds until he builds it — that is expected, not a failure.
 
   find_uncleaned -> clean_and_check (one per match: spark_clean -> check_clean) -> CLEAN_READY
+                    and, per match, spark_clean -> quarantine_rejected (runs even if spark_clean failed)
+
+A match the clean job rejects (exit 2, report with errors, no _complete marker) is quarantined: its
+spark_clean task stays red once (and alerts once), quarantine_rejected writes
+clean/_rejected/match_id={id}/_REJECTED, and find_uncleaned skips it from then on. To clean such a
+match again (after a fix), delete that marker object. A missing report (the container died before
+writing one) writes no marker, and fails quarantine_rejected, so a real crash is retried next run.
 """
 
 import os
 from datetime import datetime, timedelta
 
+from airflow.exceptions import AirflowFailException
 from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import dag, get_current_context, task, task_group
 
@@ -48,7 +56,8 @@ def clean_pending():
         from dota import clean_contract, storage
 
         pending = clean_contract.uncleaned(storage.list_keys("parsed/_complete/"),
-                                           storage.list_keys(f"clean/{clean_contract.COMPLETE}/"))
+                                           storage.list_keys(f"clean/{clean_contract.COMPLETE}/"),
+                                           storage.list_keys(f"clean/{clean_contract.REJECTED}/"))
         print(f"{len(pending)} matches uncleaned; cleaning {min(len(pending), BATCH)} this run")
         return pending[:BATCH]
 
@@ -81,7 +90,26 @@ def clean_pending():
 
             return clean_contract.check_parsed(match_id, storage.read, storage.list_keys)
 
-        spark_clean >> check_clean(match_id)
+        # Runs after spark_clean succeeds or fails. It ends green when it wrote a marker or had
+        # nothing to do (the match was cleaned); the rejection itself stays visible as the red
+        # spark_clean task. No report means the container crashed, so it fails and writes no marker.
+        @task(trigger_rule="all_done", retries=0, map_index_template=MATCH_LABEL)
+        def quarantine_rejected(match_id: int) -> bool:
+            import json
+
+            from dota import clean_contract, storage
+
+            get_current_context()["match_label"] = str(match_id)
+            report_key = f"clean/_review/match_id={match_id}/report.json"
+            if not storage.list_keys(report_key):
+                raise AirflowFailException(f"no clean report at {report_key}: clean job did not finish")
+            if not clean_contract.is_rejected(json.loads(storage.read(report_key))):
+                return False
+            storage.put(f"clean/{clean_contract.REJECTED}/match_id={match_id}/_REJECTED")
+            print(f"match {match_id} rejected by the clean job; quarantined (delete the marker to retry)")
+            return True
+
+        spark_clean >> [check_clean(match_id), quarantine_rejected(match_id)]
 
     clean_and_check.expand(match_id=find_uncleaned())
 
