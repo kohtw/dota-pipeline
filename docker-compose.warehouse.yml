@@ -1,6 +1,8 @@
 # Warehouse Postgres for the clean -> load -> dbt chain. Layer it over the base file:
 #   docker compose -p dota-pipeline -f docker-compose.yml -f docker-compose.warehouse.yml up -d
 # Anchors do not cross compose files, so each Airflow service names its WAREHOUSE_* vars itself.
+# The Airflow services also get ./dbt (for dbt_build) and ./warehouse/init (the stg table DDL that
+# steam_summary_elt runs before loading).
 # Dev-only credentials. Inside compose the host is the service name, not localhost.
 
 services:
@@ -35,6 +37,7 @@ services:
       WAREHOUSE_DB: warehouse
     volumes:
       - ./dbt:/opt/airflow/dbt:ro
+      - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL read by steam_summary_elt
     depends_on:
       warehouse:
         condition: service_healthy
@@ -48,6 +51,7 @@ services:
       WAREHOUSE_DB: warehouse
     volumes:
       - ./dbt:/opt/airflow/dbt:ro
+      - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL read by steam_summary_elt
     depends_on:
       warehouse:
         condition: service_healthy
@@ -61,6 +65,7 @@ services:
       WAREHOUSE_DB: warehouse
     volumes:
       - ./dbt:/opt/airflow/dbt:ro
+      - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL read by steam_summary_elt
     depends_on:
       warehouse:
         condition: service_healthy
@@ -74,6 +79,7 @@ services:
       WAREHOUSE_DB: warehouse
     volumes:
       - ./dbt:/opt/airflow/dbt:ro
+      - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL read by steam_summary_elt
     depends_on:
       warehouse:
         condition: service_healthy

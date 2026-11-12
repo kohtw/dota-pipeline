@@ -1,6 +1,7 @@
 """Valve Steam Web API (needs STEAM_API_KEY)."""
 
 import os
+from typing import Callable
 
 import requests
 
@@ -21,11 +22,16 @@ def newest_seq() -> int:
     return call("GetMatchHistory", matches_requested=1)["matches"][0]["match_seq_num"]
 
 
-def ranked_all_pick_from(seq: int, n: int) -> list[int]:
-    """First n ranked All Pick match ids that ended at or after seq."""
+def ranked_all_pick_from(seq: int, n: int, save_page: Callable[[int, dict], None] | None = None,
+                         max_pages: int = MAX_PAGES) -> list[int]:
+    """First n ranked All Pick match ids that ended at or after seq. If save_page is given it is
+    called with (start_seq, raw result dict) for every page fetched."""
     ids = []
-    for _ in range(MAX_PAGES):
-        matches = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)["matches"]
+    for _ in range(max_pages):
+        page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
+        if save_page:
+            save_page(seq, page)
+        matches = page["matches"]
         ids += [m["match_id"] for m in matches if m["game_mode"] == ALL_PICK and m["lobby_type"] == RANKED]
         if not matches or len(ids) >= n:
             break

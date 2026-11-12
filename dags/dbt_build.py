@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from airflow.sdk import dag, task
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import CLEAN_LOADED
+from dota.assets import CLEAN_LOADED, STEAM_LOADED
 
 # the dbt project + profiles live here inside the container; mounted by compose (Chris's area)
 DBT_DIR = os.environ.get("DBT_DIR", "/opt/airflow/dbt")
@@ -31,7 +31,7 @@ DBT_LOG_PATH = "/data/dbt/logs"
 
 
 @dag(
-    schedule=[CLEAN_LOADED],
+    schedule=(CLEAN_LOADED | STEAM_LOADED),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

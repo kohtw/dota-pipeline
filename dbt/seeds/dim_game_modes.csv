@@ -1,0 +1,27 @@
+game_mode_id,name,label
+0,game_mode_unknown,Unknown
+1,game_mode_all_pick,All Pick
+2,game_mode_captains_mode,Captains Mode
+3,game_mode_random_draft,Random Draft
+4,game_mode_single_draft,Single Draft
+5,game_mode_all_random,All Random
+6,game_mode_intro,Intro
+7,game_mode_diretide,Diretide
+8,game_mode_reverse_captains_mode,Reverse Captains Mode
+9,game_mode_greeviling,Greeviling
+10,game_mode_tutorial,Tutorial
+11,game_mode_mid_only,Mid Only
+12,game_mode_least_played,Least Played
+13,game_mode_limited_heroes,Limited Heroes
+14,game_mode_compendium_matchmaking,Compendium Matchmaking
+15,game_mode_custom,Custom
+16,game_mode_captains_draft,Captains Draft
+17,game_mode_balanced_draft,Balanced Draft
+18,game_mode_ability_draft,Ability Draft
+19,game_mode_event,Event
+20,game_mode_all_random_death_match,All Random Death Match
+21,game_mode_1v1_mid,1v1 Mid
+22,game_mode_all_draft,All Draft
+23,game_mode_turbo,Turbo
+24,game_mode_mutation,Mutation
+25,game_mode_coaches_challenge,Coaches Challenge
