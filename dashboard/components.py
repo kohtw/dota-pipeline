@@ -15,6 +15,43 @@ import streamlit as st
 MISSING_VALUE = "—"
 
 
+def style_sidebar_navigation() -> None:
+    """Match navigation typography to page headings while retaining native radio controls."""
+    # The named container keeps navigation styling separate from page controls.
+    st.html(
+        """
+        <style>
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioGroup"] {
+            width: 100%; gap: .5rem;
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioGroup"] > div {
+            width: 100%;
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"] {
+            display: block; width: 100%; box-sizing: border-box; padding: .8rem .9rem;
+            margin: 0; border: 1px solid transparent; border-radius: .65rem;
+            font-family: inherit; font-size: 1.125rem;
+            font-weight: 600; transition: background-color .15s ease, border-color .15s ease;
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"] [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"] p {
+            font-family: inherit; font-size: 1.125rem; font-weight: 600;
+            line-height: 1.5; margin: 0;
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"]:hover {
+            background-color: rgba(128,128,128,.08);
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"][data-selected] {
+            background-color: rgba(128,128,128,.14); border-color: rgba(128,128,128,.35);
+        }
+        [data-testid="stSidebar"] .st-key-dashboard_navigation [data-testid="stRadioOption"][data-focus-visible] {
+            outline: 2px solid currentColor; outline-offset: 2px;
+        }
+        </style>
+        """
+    )
+
+
 def format_number(value: int | None) -> str:
     """Format an integer statistic with thousands separators, or mark it missing."""
     # Check None explicitly: zero is a valid value for gold, kills, and denies.
@@ -52,7 +89,7 @@ def format_items(items: list[str] | None) -> str:
     if items is None:
         return "Unavailable"
     if not items:
-        return "No active items"
+        return "No items in main inventory"
     return ", ".join(items)
 
 
@@ -68,10 +105,9 @@ def render_match_header(match: dict) -> None:
 
     # Present the main match facts together. IDs remain ungrouped identifiers,
     # while duration uses the shared formatter for consistent clock notation.
-    match_column, winner_column, mode_column, duration_column = st.columns(4)
+    match_column, winner_column, duration_column = st.columns(3)
     match_column.metric("Match ID", str(match_id) if match_id is not None else MISSING_VALUE)
     winner_column.metric("Result", winner_label)
-    mode_column.metric("Game mode", match.get("game_mode_label") or MISSING_VALUE)
     duration_column.metric("Duration", format_duration(match.get("duration_s")))
 
 
@@ -86,33 +122,30 @@ def render_team_scoreboard(team_label: str, players: list[dict]) -> None:
         "K / D / A: kills / deaths / assists · LH: last hits · DN: denies. "
         "KP is the percentage of team kills the player scored or assisted. "
         "KP shows — when the team had zero kills or the data is unavailable. "
-        "Gold is unspent gold. Active items are the main-inventory items at match end, "
-        "not items with an activated ability; backpack, stash, neutral-slot items, "
+        "Gold is unspent gold. Final main inventory shows items held at match end, "
+        "including passive items; backpack, stash, neutral-slot items, "
         "and consumed upgrades are excluded. — means unavailable."
     )
 
     # A native HTML table keeps headers and cells aligned while giving short
     # statistics only the space they need. Escaping all record values prevents
-    # hero, player, and item names from being interpreted as HTML.
-    labels = ["Hero / Player", "K", "D", "A", "LH", "DN", "Net worth", "Gold", "KP", "Active items"]
+    # hero and item names from being interpreted as HTML.
+    labels = ["Hero", "K", "D", "A", "LH", "DN", "Net worth", "Gold", "KP", "Final main inventory"]
     header = "".join(f'<th scope="col">{escape(label)}</th>' for label in labels)
     # Keep these fields in header order. KP and inventory use their own formatters.
     stat_fields = ["kills", "deaths", "assists", "last_hits", "denies", "net_worth", "gold"]
     rows = []
     for player in sorted(players, key=lambda participant: participant["slot"]):
         hero = escape(player.get("hero_label") or player.get("hero") or MISSING_VALUE)
-        player_name = ""
-        if player.get("player_name"):
-            player_name = f'<small>{escape(player["player_name"])}</small>'
         # Encode identity in an ordinary same-tab link so refreshes retain the
         # selected participant without requiring JavaScript inside the table.
         query = urlencode({"match_id": player["match_id"], "player_slot": player["slot"]})
-        link = f'<a href="?{escape(query, quote=True)}" target="_self">{hero}{player_name}</a>'
+        link = f'<a href="?{escape(query, quote=True)}" target="_self">{hero}</a>'
         cells = f'<td class="hero">{link}</td>'
         for field in stat_fields:
             cells += f'<td class="number">{escape(format_number(player.get(field)))}</td>'
         cells += f'<td class="number">{format_percentage(player.get("kill_participation"))}</td>'
-        cells += f'<td class="items">{escape(format_items(player.get("active_items")))}</td>'
+        cells += f'<td class="items">{escape(format_items(player.get("main_inventory")))}</td>'
         rows.append(f"<tr>{cells}</tr>")
 
     # Scope styles to the scoreboard so the match header and other Streamlit
@@ -134,8 +167,6 @@ def render_team_scoreboard(team_label: str, players: list[dict]) -> None:
         .dota-scoreboard .hero a:hover { text-decoration-thickness: 2px; }
         .dota-scoreboard .hero a:focus-visible { outline: 2px solid currentColor;
             outline-offset: 3px; }
-        .dota-scoreboard small { display: block; font-size: .75rem; opacity: .7;
-            margin-top: .1rem; }
         .dota-scoreboard .number { width: 1%; white-space: nowrap;
             text-align: right; font-variant-numeric: tabular-nums; }
         .dota-scoreboard th:nth-child(n+2):nth-child(-n+9) { text-align: right; }
