@@ -1,0 +1,56 @@
+{
+ "result": {
+  "data": {
+   "heroes": [
+    {
+     "id": 1,
+     "name": "npc_dota_hero_antimage",
+     "name_loc": "Anti-Mage",
+     "name_english_loc": "Anti-Mage",
+     "primary_attr": 1,
+     "complexity": 1
+    },
+    {
+     "id": 2,
+     "name": "npc_dota_hero_axe",
+     "name_loc": "Axe",
+     "name_english_loc": "Axe",
+     "primary_attr": 0,
+     "complexity": 1
+    },
+    {
+     "id": 3,
+     "name": "npc_dota_hero_bane",
+     "name_loc": "Bane",
+     "name_english_loc": "Bane",
+     "primary_attr": 3,
+     "complexity": 2
+    },
+    {
+     "id": 5,
+     "name": "npc_dota_hero_crystal_maiden",
+     "name_loc": "Crystal Maiden",
+     "name_english_loc": "Crystal Maiden",
+     "primary_attr": 2,
+     "complexity": 1
+    },
+    {
+     "id": 14,
+     "name": "npc_dota_hero_pudge",
+     "name_loc": "Pudge",
+     "name_english_loc": "Pudge",
+     "primary_attr": 0,
+     "complexity": 2
+    },
+    {
+     "id": 76,
+     "name": "npc_dota_hero_obsidian_destroyer",
+     "name_loc": "Outworld Destroyer",
+     "name_english_loc": "Outworld Destroyer",
+     "primary_attr": 2,
+     "complexity": 2
+    }
+   ]
+  }
+ }
+}

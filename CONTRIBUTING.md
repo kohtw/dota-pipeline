@@ -166,6 +166,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
   ```
   (`--project-dir` is where `dbt_project.yml` is; `--profiles-dir` is where `profiles.yml` is. The `DBT_*_PATH` variables keep dbt's output out of the repo. Install with `pip install duckdb dbt-core dbt-duckdb` in a venv outside the repo.)
 - Write portable SQL (plain joins and window functions) so the same models run on DuckDB and Postgres.
+- Reference data is dbt seeds in `dbt/seeds/`: `dim_heroes`, `dim_items`, `dim_patches` (from Valve's dota2.com datafeed) and `dim_game_modes` (from OpenDota, as the datafeed has none). After a game patch, run `python3 scripts/refresh_constants.py`, review the CSV diff, and commit it. Join heroes and items on their `npc_dota_hero_*` / `item_*` names, which is what replays use.
 
 ### 11. Tests
 

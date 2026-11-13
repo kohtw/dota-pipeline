@@ -1,13 +1,41 @@
-# Static reference data from OpenDota constants. Refresh with scripts/refresh_constants.py.
+# Static reference data: heroes, items and patches from Valve's dota2.com datafeed, game modes from
+# OpenDota (the datafeed has none). Refresh with scripts/refresh_constants.py.
 version: 2
 seeds:
   - name: dim_heroes
-    description: "One row per Dota 2 hero. Join on npc_name (matches the clean hero_name), not hero_id."
+    description: "One row per Dota 2 hero. Join on npc_name (matches the clean hero_name), not hero_id. roles lists the strongest first."
     columns:
       - name: hero_id
         data_tests: [unique, not_null]
       - name: npc_name
+        data_tests: [unique, not_null]
+      - name: localized_name
         data_tests: [not_null]
+      - name: primary_attr
+        data_tests:
+          - accepted_values: {arguments: {values: ["str", "agi", "int", "all"]}}
+  - name: dim_items
+    description: "One row per item, recipes included (is_recipe). Join on name, the item_* name replays use. localized_name is blank for a few recipes Valve leaves unnamed."
+    config:
+      column_types:
+        item_id: integer
+        is_recipe: boolean
+        neutral_tier: integer
+    columns:
+      - name: item_id
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [unique, not_null]
+  - name: dim_patches
+    description: "One row per gameplay patch with its release time in UTC. A match belongs to the latest patch released before its start time."
+    config:
+      column_types:
+        released_at: timestamp
+    columns:
+      - name: patch
+        data_tests: [unique, not_null]
+      - name: released_at
+        data_tests: [unique, not_null]
   - name: dim_game_modes
     description: "One row per Dota 2 game mode id, with a readable label."
     columns:
