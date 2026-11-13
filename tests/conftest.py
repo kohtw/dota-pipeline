@@ -1,43 +1,60 @@
-import os
-import shutil
-import subprocess
-import sys
+"""Shared dashboard records and offline warehouse doubles."""
+
+from importlib import import_module
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+@pytest.fixture
+def dashboard_database(monkeypatch):
+    """Import loaders as Streamlit does, without starting the interface."""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "dashboard"))
+    return import_module("dashboard_db")
 
 
-@pytest.fixture(scope="session")
-def dashboard_fixture_db(tmp_path_factory):
-    """Build the actual dbt marts once in a database dedicated to this test run."""
-    pytest.importorskip("duckdb")
-    pytest.importorskip("dbt.adapters.duckdb")
+@pytest.fixture
+def warehouse_config(dashboard_database):
+    from config import load_warehouse_config
 
-    directory = tmp_path_factory.mktemp("dashboard")
-    database = directory / "fixture.duckdb"
-    shutil.copyfile(REPO_ROOT / "dbt" / "profiles.yml", directory / "profiles.yml")
-    env = {
-        **os.environ,
-        "DUCKDB_PATH": str(database),
-        "DBT_TARGET_PATH": str(directory / "target"),
-        "DBT_LOG_PATH": str(directory / "logs"),
-        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
-    }
+    return load_warehouse_config({"WAREHOUSE_PASSWORD": "offline-test-password"})
 
-    commands = (
-        ["warehouse/make_dev_db.py", str(database)],
-        ["-c", "from dbt.cli.main import cli; cli()", "build",
-         "--project-dir", "dbt", "--profiles-dir", str(directory), "--target", "dev"],
-    )
-    for command in commands:
-        result = subprocess.run(
-            [sys.executable, *command], cwd=REPO_ROOT, env=env,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
-        )
-        if result.returncode:
-            pytest.fail(f"Dashboard fixture setup failed.\n{result.stdout}\n{result.stderr}")
 
-    return database
+@pytest.fixture
+def scoreboard_rows():
+    """Represent a controlled mart result with both teams and optional statistics."""
+    players = [
+        (0, "antimage", 2, 2, 1, 0, 6000, 400, "item_blink,item_desolator", True, 2 / 3, 3, 2),
+        (1, "crystal_maiden", 2, 1, 1, 2, 3000, 200, None, True, 1.0, 3, 3),
+        (5, "axe", 3, 1, 2, 0, 5000, 300, None, False, 0.5, 2, 1),
+        (6, "lina", 3, 1, 1, 1, 3500, 250, None, False, 1.0, 2, 2),
+    ]
+    return [
+        dict(match_id=9000000001, slot=slot, hero=f"npc_dota_hero_{hero}", team=team,
+             kills=kills, deaths=deaths, assists=assists, last_hits=80, denies=10,
+             net_worth=net_worth, gold=gold, final_items=items, duration_s=600.0,
+             won=won, kill_participation=kp, team_kills=team_kills, kill_involvements=involvements)
+        for slot, hero, team, kills, deaths, assists, net_worth, gold, items, won, kp, team_kills, involvements
+        in players
+    ]
+
+
+@pytest.fixture
+def warehouse_cursor(dashboard_database, monkeypatch):
+    """Supply cursor results without opening a network connection."""
+    cursor = MagicMock()
+    connection = MagicMock()
+    connection.cursor.return_value.__enter__.return_value = cursor
+    manager = MagicMock()
+    manager.__enter__.return_value = connection
+    opener = MagicMock(return_value=manager)
+    monkeypatch.setattr(dashboard_database, "open_postgres_database", opener)
+    return cursor
+
+
+@pytest.fixture
+def scoreboard_cursor(warehouse_cursor, scoreboard_rows):
+    warehouse_cursor.description = [(column,) for column in scoreboard_rows[0]]
+    warehouse_cursor.fetchall.return_value = [tuple(row.values()) for row in scoreboard_rows]
+    return warehouse_cursor

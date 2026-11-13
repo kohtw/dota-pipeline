@@ -17,7 +17,7 @@ TEAM_LABELS = {2: "Radiant", 3: "Dire"}
 
 
 def _format_game_time(seconds: int) -> str:
-    """Label game-relative time, including purchases made before the horn."""
+    """Label game-relative progression time, including samples before the horn."""
     clock = format_duration(abs(seconds))
     return f"−{clock}" if seconds < 0 else clock
 
@@ -101,52 +101,23 @@ def _render_hero_damage(
         st.table(source_rows, hide_index=True)
 
 
-def _render_purchase_history(purchases: list[dict] | None, start: int, end: int) -> None:
-    """Display one participant's purchase events within the selected interval."""
-    # A missing feed and an empty interval have different meanings. Handle each
-    # within this participant's view so the other player's history can still render.
-    if purchases is None:
-        st.info("Purchase history is unavailable for this participant.")
-        return
-
-    # Sort individual events without grouping by item so repeat purchases stay visible.
-    visible_purchases = [
-        event for event in sorted(purchases, key=lambda event: event["game_time_s"])
-        if start <= event["game_time_s"] <= end
-    ]
-    if not visible_purchases:
-        st.info("No purchases in this interval.")
-        return
-
-    st.table(
-        [{"Game time": _format_game_time(event["game_time_s"]), "Purchased item": event["item_name"]}
-         for event in visible_purchases],
-        hide_index=True,
-    )
-
-
 def render_player_page(
     match: dict,
     player: dict,
     snapshots: list[dict] | None = None,
-    purchases: list[dict] | None = None,
     *,
     comparison_player: dict | None = None,
     comparison_snapshots: list[dict] | None = None,
-    comparison_purchases: list[dict] | None = None,
     damage_by_slot: dict[int, list[dict]] | None = None,
     roster: list[dict] | None = None,
 ) -> None:
     """Display the player page from match records supplied by the app.
 
     The optional comparison inputs keep the second player's data separate. A
-    comparison player can be present even if either of their histories is missing.
+    comparison player can be present even if either progression series is missing.
     """
-    # The hero remains identifiable even when the replay does not provide a
-    # player name. Plain text preserves names containing Markdown punctuation.
+    # Hero, team and slot identify a participant within the match without account-name data.
     st.title(player.get("hero_label") or player.get("hero") or "Player analysis")
-    if player.get("player_name"):
-        st.text(player["player_name"])
 
     # Team and match context distinguish the participant without assuming a
     # gameplay role or requiring a Steam account ID.
@@ -207,10 +178,9 @@ def render_player_page(
                 column.metric(label, format_number(player.get(field)))
         st.metric("Kill participation", _kill_participation_detail(player))
 
-    # Display the supplied final main-inventory snapshot independently of
-    # purchase history: buying an item does not establish where it ended up.
+    # Display the final main-inventory snapshot independently of progression charts.
     # Plain text preserves item names without interpreting them as Markdown.
-    st.subheader("Active items at match end")
+    st.subheader("Final main inventory")
     st.caption(
         "Main inventory only, including passive items. Backpack, stash, "
         "neutral-slot items, and consumed upgrades are excluded."
@@ -218,9 +188,9 @@ def render_player_page(
     if comparison_player is not None:
         for column, label, participant in zip(st.columns(2), comparison_labels, participants):
             column.text(label)
-            column.text(format_items(participant.get("active_items")))
+            column.text(format_items(participant.get("main_inventory")))
     else:
-        st.text(format_items(player.get("active_items")))
+        st.text(format_items(player.get("main_inventory")))
 
     # The damage mart contains full-match totals with no event timestamps to filter.
     if damage_by_slot is not None:
@@ -231,15 +201,12 @@ def render_player_page(
             selected_players = [(player["slot"], f"{hero} · {team}")]
         _render_hero_damage(selected_players, damage_by_slot, roster or [])
 
-    # Base the shared clock range on both participants' available records.
-    # Pregame purchases can extend the start and purchase-only data still
-    # warrants a slider, even when neither player has progression samples.
+    # Base the shared clock range on both participants' progression samples.
     observations = snapshots or []
     comparison_observations = comparison_snapshots or []
-    timed_records = [*observations, *(purchases or [])]
+    timed_records = list(observations)
     if comparison_player is not None:
         timed_records.extend(comparison_observations)
-        timed_records.extend(comparison_purchases or [])
 
     timestamps = [record["game_time_s"] for record in timed_records]
     # Keep whole-second slider bounds while including fractional observations.
@@ -247,15 +214,15 @@ def render_player_page(
     end = ceil(max(0, match.get("duration_s") or 0, max(timestamps, default=0)))
     if timestamps and end > start:
         start, end = st.slider(
-            "Game time range (seconds)",
+            "Progression time range (seconds)",
             min_value=start,
             max_value=end,
             value=(start, end),
             key=f"progression_range_{match_id}_{player['slot']}",
         )
         st.caption(
-            f"Showing {_format_game_time(start)} to {_format_game_time(end)}. "
-            "Final match statistics show the full match."
+            f"Showing {_format_game_time(start)} to {_format_game_time(end)} for net worth and XP. "
+            "Final statistics and inventory stay at match end; damage and kill participation use full-match totals."
         )
 
     # Use the comparison labels from the stats table in both chart legends.
@@ -301,14 +268,3 @@ def render_player_page(
             comparison_label=secondary_label if comparison_player is not None else None,
         )
         st.plotly_chart(figure, key=f"{metric}_{match['match_id']}_{player['slot']}")
-
-    # Purchase history uses the chart's time range and the stats table's player order.
-    st.subheader("Purchase history")
-    st.caption("Purchase events are listed separately from the active inventory at match end.")
-    if comparison_player is None:
-        _render_purchase_history(purchases, start, end)
-    else:
-        for column, label, history in zip(st.columns(2), comparison_labels, (purchases, comparison_purchases)):
-            with column:
-                st.text(label)
-                _render_purchase_history(history, start, end)
