@@ -1,5 +1,6 @@
 """Garage (S3-compatible) raw bucket. Config from env: S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY."""
 
+import io
 import os
 
 import boto3
@@ -10,6 +11,8 @@ from botocore.exceptions import ClientError
 
 from dota.config import BUCKET
 from dota.errors import PermanentError, is_transient_status, redact
+
+DEM_MAGIC = b"PBDEMS2\0"  # first bytes of every Source 2 replay
 
 
 def client():
@@ -62,6 +65,15 @@ def upload_replay(url: str, key: str) -> None:
                 problem = f"replay download for {key} failed: HTTP {r.status_code}"
                 raise RuntimeError(problem) if is_transient_status(r.status_code) else PermanentError(problem)
             with zstandard.ZstdDecompressor().stream_reader(r.raw) as dem:
-                client().upload_fileobj(dem, BUCKET, key)
+                # a body that is not a replay would otherwise land in Garage and crash the parser
+                # in every sweep until quarantined; peek leaves the header in the upload
+                replay = io.BufferedReader(dem)
+                try:
+                    head = replay.peek(len(DEM_MAGIC))[:len(DEM_MAGIC)]
+                except zstandard.ZstdError:  # not zstd at all, e.g. an HTML error page
+                    head = b""
+                if head != DEM_MAGIC:
+                    raise PermanentError(f"replay download for {key} is not a Dota 2 replay")
+                client().upload_fileobj(replay, BUCKET, key)
     except requests.RequestException as e:
         raise RuntimeError(redact(f"replay download for {key} failed: {e}")) from None
