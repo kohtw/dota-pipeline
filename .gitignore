@@ -7,3 +7,6 @@ data/parsed/**/*.crc
 __pycache__/
 .env
 .venv
+# editor settings and dbt's generated user id
+.vscode/
+dbt/.user.yml

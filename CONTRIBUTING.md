@@ -21,7 +21,7 @@ docs/data-contract.md      raw layer: what lands in Garage, table by table and c
 docs/clean-contract.md     clean layer + warehouse: grain, key and columns of each clean table and mart
 warehouse/                 Postgres DDL (init/), a fixture match, and make_dev_db.py for local tests
 dbt/                       dbt project: marts built from the clean tables
-scripts/                   one-off / manual tools (ingest, clean)
+scripts/                   manual tools: check_clean, reconcile_steam_replay, refresh_constants, run_metrics
 dashboard/                 Streamlit app over the marts; Dockerfile = the compose `dashboard` service
 airflow/, garage/          Docker images for the local stack
 ```
