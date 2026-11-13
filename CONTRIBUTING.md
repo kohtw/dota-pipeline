@@ -22,6 +22,7 @@ docs/clean-contract.md     clean layer + warehouse: grain, key and columns of ea
 warehouse/                 Postgres DDL (init/), a fixture match, and make_dev_db.py for local tests
 dbt/                       dbt project: marts built from the clean tables
 scripts/                   one-off / manual tools (ingest, clean)
+dashboard/                 Streamlit app over the marts; Dockerfile = the compose `dashboard` service
 airflow/, garage/          Docker images for the local stack
 ```
 
@@ -46,6 +47,7 @@ airflow/, garage/          Docker images for the local stack
 3. Open:
    - Airflow: http://localhost:8080 (no login)
    - Garage (file browser): http://localhost:3909
+   - Dashboard: http://localhost:8501. It shows whatever marts dbt has built so far. To run only the dashboard over an existing warehouse: `docker compose up -d --build dashboard`.
 
 To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match_id": 1234567890}`. Its replay must already be in Garage (`raw/replays/{match_id}.dem`).
 

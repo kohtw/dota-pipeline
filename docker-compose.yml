@@ -2,6 +2,7 @@
 #   docker build -t dota-parser -f parser/Dockerfile .
 #   docker compose up -d --build --remove-orphans
 # UI: http://localhost:8080 (no login)
+# Dashboard: http://localhost:8501
 # S3 (Garage): http://localhost:3900 (API only; browse via garage-webui at http://localhost:3909), region us-east-1, path-style; creds below (dev only)
 
 # fixed project name: the DAGs hard-code the network dota-pipeline_default, so no -p flag is needed
@@ -10,6 +11,14 @@ name: dota-pipeline
 x-s3-creds: &s3-creds
   S3_ACCESS_KEY: GK1a2b3c4d5e6f7a8b9c0d1e2f
   S3_SECRET_KEY: 9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0
+
+# warehouse Postgres (dev-only credentials); the host is the service name, not localhost
+x-warehouse-conn: &warehouse-conn
+  WAREHOUSE_HOST: warehouse
+  WAREHOUSE_PORT: "5432"
+  WAREHOUSE_USER: warehouse
+  WAREHOUSE_PASSWORD: warehouse
+  WAREHOUSE_DB: warehouse
 
 x-airflow-common: &airflow-common
   build: ./airflow
@@ -21,18 +30,12 @@ x-airflow-common: &airflow-common
     # shared across containers so api-server and scheduler trust each other's tokens
     AIRFLOW__API_AUTH__JWT_SECRET: local-dev-jwt-secret
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
-    <<: *s3-creds
+    <<: [*s3-creds, *warehouse-conn]
     S3_ENDPOINT: http://garage:3900
     # one key for every Airflow container, so Variables and Connections decrypt everywhere; from .env
     AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW_FERNET_KEY:?add AIRFLOW_FERNET_KEY to .env; generate one with: python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"}'
     STEAM_API_KEY: ${STEAM_API_KEY:-}  # from .env; https://steamcommunity.com/dev/apikey
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}  # from .env; blank disables the webhook
-    # warehouse Postgres (dev-only credentials); the host is the service name, not localhost
-    WAREHOUSE_HOST: warehouse
-    WAREHOUSE_PORT: "5432"
-    WAREHOUSE_USER: warehouse
-    WAREHOUSE_PASSWORD: warehouse
-    WAREHOUSE_DB: warehouse
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt:/opt/airflow/dbt:ro  # read by dbt_build
@@ -79,6 +82,21 @@ services:
       test: ["CMD", "pg_isready", "-U", "warehouse", "-d", "warehouse"]
       interval: 5s
       retries: 10
+
+  # Streamlit app over the dbt marts; reads only, so it starts without Airflow
+  dashboard:
+    build: ./dashboard
+    environment:
+      <<: *warehouse-conn
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 10s
+      retries: 6
 
   # lets Airflow start the dota-parser container without giving it the raw docker socket
   docker-proxy:
