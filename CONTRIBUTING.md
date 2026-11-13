@@ -22,6 +22,7 @@ docs/clean-contract.md     clean layer + warehouse: grain, key and columns of ea
 warehouse/                 Postgres DDL (init/), a fixture match, and make_dev_db.py for local tests
 dbt/                       dbt project: marts built from the clean tables
 scripts/                   one-off / manual tools (ingest, clean)
+dashboard/                 Streamlit app over the marts; Dockerfile = the compose `dashboard` service
 airflow/, garage/          Docker images for the local stack
 ```
 
@@ -46,6 +47,7 @@ airflow/, garage/          Docker images for the local stack
 3. Open:
    - Airflow: http://localhost:8080 (no login)
    - Garage (file browser): http://localhost:3909
+   - Dashboard: http://localhost:8501. It shows whatever marts dbt has built so far. To run only the dashboard over an existing warehouse: `docker compose up -d --build dashboard`.
 
 To parse a replay, trigger `replay_parse` in the Airflow UI with config `{"match_id": 1234567890}`. Its replay must already be in Garage (`raw/replays/{match_id}.dem`).
 
@@ -65,8 +67,15 @@ Follow these steps once if you started the stack before the Airflow database ser
 
 1. Add `AIRFLOW_FERNET_KEY` to `.env`. `.env.example` has the command that generates one. Until the key is set, every `docker compose` command stops with an error, including `ps` and `logs`.
 2. Run `docker compose up -d --build --remove-orphans`. The rename leaves the old `postgres` container running, and it uses the same `pg-data` volume as `airflow-db`. Two Postgres servers on one data directory corrupt it (run history, Variables, the download bookmark). `--remove-orphans` removes the old container only, not the volume.
-3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
+3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`, `steam_fetch_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
 4. Rebuild your dev DuckDB file with `python warehouse/make_dev_db.py ~/.cache/dota/dev.duckdb` before the next local `dbt build` (rule 10). The project now has models that read `stg.steam_*`.
+
+### Pools, the Steam fetch and failed matches
+
+- **Pools.** `airflow-init` creates the pools `spark` (2 slots, parser and Spark clean containers), `steam_api` (1) and `opendota_api` (2). A task whose pool does not exist waits in "scheduled" forever, so on a stack started before the pools existed, run `docker compose up -d` once more.
+- **Steam fetch budget.** The Variable `steam_fetch_pages_per_run` sets how many pages of 100 matches `steam_fetch` saves each hour (default 10). Keep it at 50 or below: `steam_summary_elt` loads 50 pages per run, so more pages pile up unloaded.
+- **Alerts.** Failures and retries are logged to `/data/alerts/failures.jsonl`. To also get failures in Discord, set `ALERT_WEBHOOK_URL` in `.env` to a webhook URL. It is optional; blank turns it off.
+- **Quarantined matches.** A match whose parser or clean container crashes in 3 sweeps is skipped from then on. A crash is a non-zero exit other than 137 (a kill for memory, which Airflow retries) and, for clean, 2 (a rejection, see `clean/_rejected/`). A failure where no container ran (image missing, docker-proxy down) is not counted. To retry a quarantined match after a fix, delete `parsed/_failed/match_id={id}/` or `clean/_failed/match_id={id}/` in Garage.
 
 ## Rules
 
@@ -78,7 +87,7 @@ Why: logic in plain modules can be run and tested without Airflow, and reused by
 
 ```python
 # Good: the task just wires modules together
-@task(retries=5, retry_delay=timedelta(minutes=1))
+@task(pool="opendota_api", **API_RETRY)
 def download_replay(match_id: int) -> str:
     from dota import opendota, storage
 
@@ -101,7 +110,7 @@ def download_replay(match_id: int) -> str:
 
 ### 3. Keep DAG files cheap to import
 
-The Airflow scheduler re-reads every DAG file roughly every 30 seconds. At the top of a DAG file, import only `airflow` and `dota.config`. Import everything else (`dota.steam`, `dota.storage`, `boto3`, ...) inside the task function.
+The Airflow scheduler re-reads every DAG file roughly every 30 seconds. At the top of a DAG file, import only `airflow`, `dota.config`, `dota.alerts`, `dota.assets` and `dota.jobs`. Import everything else (`dota.steam`, `dota.storage`, `boto3`, ...) inside the task function.
 
 ### 4. Config and secrets
 
@@ -125,7 +134,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
 
 ### 8. Respect the outside services' limits
 
-- **Steam:** leave 4-7 seconds between calls. Calling faster gets you a run of error responses for about 5 minutes. Back off and retry; never loop without a delay.
+- **Steam:** leave 2 seconds between calls, and on a 429 or 5xx back off for 15, 30, 60, then 120 seconds (`dota.steam`). A 40-page run at 2 seconds finished with no 429s; at 1 second Valve returned 429 after about 10-20 calls. Never loop without a delay.
 - **OpenDota:** free tier has a daily cap. Never add a call inside a loop without a cap. Cache what you fetch.
 - A failure in one match must not stop the others. Log it, skip it, carry on.
 

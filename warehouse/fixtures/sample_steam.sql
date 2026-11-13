@@ -11,7 +11,8 @@
 --   hero 3: picks 4, wins 2 (M1, M3), pick_rate 1.0, win_rate 0.5
 --   hero 13: absent (only in excluded matches)
 
-INSERT INTO stg.steam_matches VALUES
+INSERT INTO stg.steam_matches (match_id, match_seq_num, start_time, duration, game_mode, lobby_type,
+                               radiant_win, human_players) VALUES
  (9100000001, 9100000001, 1700000000, 2400, 22, 7, TRUE, 10),
  (9100000002, 9100000002, 1700000000, 2400, 22, 7, FALSE, 10),
  (9100000003, 9100000003, 1700000000, 2400, 22, 7, TRUE, 10),
@@ -22,7 +23,7 @@ INSERT INTO stg.steam_matches VALUES
  (9100000008, 9100000008, 1700000000, 2400, 22, 7, NULL, 10),
  (9100000009, 9100000009, 1700000000, 2400, 1, 7, TRUE, 10);
 
-INSERT INTO stg.steam_players VALUES
+INSERT INTO stg.steam_players (match_id, player_slot, hero_id, kills, deaths, assists, leaver_status) VALUES
  (9100000001, 0, 1, 5, 5, 5, 0),
  (9100000001, 1, 2, 5, 5, 5, 0),
  (9100000001, 2, 3, 5, 5, 5, 0),

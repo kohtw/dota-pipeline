@@ -133,3 +133,14 @@ def test_report_and_rejected_keys():
     assert cc.rejected_key(5) == "clean/_rejected/match_id=5/_REJECTED"
     # the rejected marker must be one that uncleaned() recognises
     assert cc.uncleaned(["parsed/_complete/match_id=5/_SUCCESS"], [], [cc.rejected_key(5)]) == []
+
+
+def test_uncleaned_skips_exhausted_ids_but_keeps_two_failures():
+    from dota import attempts
+
+    parsed = [f"parsed/_complete/match_id={i}/part-0.parquet" for i in (1, 2, 3)]
+    runs = [f"scheduled__2026-11-12T0{h}:00:00+00:00" for h in range(3)]
+    failed = [attempts.failure_key("clean", 1, r) for r in runs]
+    failed += [attempts.failure_key("clean", 2, r) for r in runs[:2]]
+    failed += [attempts.failure_key("parsed", 3, r) for r in runs]
+    assert cc.uncleaned(parsed, [], [], failed) == [3, 2]

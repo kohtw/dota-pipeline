@@ -1,6 +1,7 @@
 """Plain constants, safe to import at DAG-parse time (no heavy dependencies)."""
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 BUCKET = "raw"  # Garage raw bucket
@@ -10,3 +11,8 @@ DOCKER_NETWORK = "dota-pipeline_default"  # compose network, so parser container
 # steam_summary_elt both read it.
 WAREHOUSE_INIT_DIR = Path(os.environ.get(
     "WAREHOUSE_INIT_DIR", Path(__file__).resolve().parents[2] / "warehouse" / "init"))
+# Spark's default 1 GB driver heap plus headroom for the Python driver and the JVM's off-heap memory
+JOB_MEM_LIMIT = "2g"
+# task retries for tasks that call Steam or OpenDota, on top of the clients' own retries within a call
+API_RETRY = {"retries": 4, "retry_delay": timedelta(minutes=1), "retry_exponential_backoff": 2.0,
+             "max_retry_delay": timedelta(minutes=30)}
