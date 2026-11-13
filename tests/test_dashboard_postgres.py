@@ -182,7 +182,8 @@ def test_live_app_renders_players_comparison_and_hero_route(dashboard_database):
     assert app.title[0].value == "Hero statistics"
     if heroes:
         assert app.selectbox(key="hero_stats_selected_id").value in {hero["hero_id"] for hero in heroes}
-        assert len(app.dataframe[0].value) == len(heroes)
+        comparison = next(frame.value for frame in app.dataframe if "Hero" in frame.value.columns)
+        assert len(comparison) == len(heroes)
     else:
         assert app.info[0].value == "No hero statistics available yet."
         assert not app.metric

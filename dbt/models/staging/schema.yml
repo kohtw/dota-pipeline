@@ -2,3 +2,57 @@ version: 2
 models:
   - name: stg_steam_ranked
     description: "One player of every ranked All Pick match worth counting, from the Steam match summaries. Filter: lobby_type 7 (ranked), game_mode 22 (All Pick), duration at least 900 seconds (15 minutes), human_players 10, radiant_win known. Matches with leavers are kept: leaver_status is not filtered."
+    columns:
+      - name: match_id
+        description: "Steam match ID; together with player_slot identifies one appearance."
+        data_tests: [not_null]
+      - name: player_slot
+        description: "Steam player slot: 0-4 Radiant, 128-132 Dire. Composite key with match_id."
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [0, 1, 2, 3, 4, 128, 129, 130, 131, 132], quote: false}}
+      - name: hero_id
+        description: "Nullable Steam hero ID. Each non-null hero appears at most once per qualifying match, checked by steam_ranked_hero_unique_in_match. NULL IDs remain in staging but cannot form opponent pairs."
+      - name: on_radiant
+        description: "True when Steam player_slot < 128; valid slots are checked before downstream matchup analysis. Replay slot numbering is not used."
+      - name: radiant_win
+        description: "Known match result. A player wins when radiant_win equals on_radiant."
+      - name: duration
+        description: "Match duration in seconds, at least 900 after qualification."
+      - name: gold_per_min
+        description: "Steam-reported gold per minute, nullable when absent in the source. Zero is a recorded value."
+      - name: xp_per_min
+        description: "Steam-reported XP per minute, nullable when absent in the source. Zero is a recorded value."
+      - name: hero_damage
+        description: "Steam-reported full-match hero damage, nullable when absent. Not derived from replay damage events."
+      - name: hero_healing
+        description: "Steam-reported full-match hero healing, nullable when absent. Zero is a recorded value."
+      - name: tower_damage
+        description: "Steam-reported full-match tower damage, nullable when absent. Zero is a recorded value."
+
+  - name: stg_replay_player_observations
+    description: "One roster player per replay match and ten-second observation time. Latest snapshot at or before the grid time, then assessed for nonnegative net worth and age <= 5 seconds. Keeps missing/stale observations for coverage diagnostics. See docs/team-advantage-contract.md."
+    columns:
+      - name: match_id
+        description: "Replay match ID; composite key with player_slot and observation_time_s."
+        data_tests: [not_null]
+      - name: player_slot
+        description: "Clean player slot, 0-4 Radiant and 5-9 Dire."
+        data_tests: [not_null]
+      - name: team
+        description: "Clean team: 2 Radiant or 3 Dire."
+        data_tests: [not_null]
+      - name: observation_time_s
+        description: "Requested game-clock time on the ten-second grid, capped at recorded match duration."
+        data_tests: [not_null]
+      - name: snapshot_tick
+        description: "Tick of the latest selected snapshot; NULL when no earlier snapshot exists."
+      - name: snapshot_game_time_s
+        description: "Actual selected snapshot game time; never later than the observation time."
+      - name: snapshot_age_s
+        description: "Observation time minus selected snapshot time; age 5 is fresh, age above 5 is stale. NULL when no snapshot exists; stale ages are retained."
+      - name: net_worth
+        description: "Selected snapshot's recorded net worth, including unusable NULL or negative values; never filled from older data."
+      - name: is_usable
+        description: "True only for recorded nonnegative net worth with snapshot age between zero and five seconds inclusive."
+        data_tests: [not_null]

@@ -11,12 +11,16 @@ from dashboard_db import (
     load_available_matches,
     load_default_match_id,
     load_hero_statistics,
+    load_hero_performance,
+    load_hero_matchups,
     load_player_damage,
     load_player_snapshots,
     load_scoreboard,
+    load_team_advantage,
 )
 from player import render_player_page
 from hero_stats import render_hero_statistics
+from team_advantage import render_team_advantage
 from match_search import render_match_examples, render_match_search
 
 
@@ -204,12 +208,14 @@ def render_match_analysis(config: WarehouseConfig) -> None:
             comparison_snapshots=snapshots_by_slot.get(other_slot),
             damage_by_slot=damage_by_slot,
             roster=players,
+            team_advantage=_load_team_advantage(config, requested_match),
         )
         return
 
     # Missing optional statistics are formatted by the components rather than
     # rejected here, allowing incomplete records to remain visible and honest.
     render_match_header(match)
+    render_team_advantage(_load_team_advantage(config, requested_match), requested_match)
     st.caption("Select a hero to open their individual match analysis.")
     st.divider()
 
@@ -219,6 +225,15 @@ def render_match_analysis(config: WarehouseConfig) -> None:
     dire_players = [player for player in players if player["team"] == 3]
     render_team_scoreboard("Radiant", radiant_players)
     render_team_scoreboard("Dire", dire_players)
+
+
+def _load_team_advantage(config: WarehouseConfig, match_id: int) -> list[dict] | None:
+    """An unavailable optional team mart must not hide scoreboards or player analysis."""
+    try:
+        return load_team_advantage(config, match_id)
+    except DashboardDatabaseError:
+        st.warning("Team advantage could not be loaded. Other match analysis remains available.")
+        return None
 
 
 def main() -> None:
@@ -256,7 +271,10 @@ def main() -> None:
             st.title("Hero statistics")
             st.error(str(error))
             return
-        render_hero_statistics(heroes)
+        render_hero_statistics(
+            heroes, performance_loader=lambda hero_id: load_hero_performance(config, hero_id),
+            matchup_loader=lambda hero_id: load_hero_matchups(config, hero_id),
+        )
         return
     render_match_analysis(config)
 

@@ -90,6 +90,8 @@ def hero_app(dashboard_database, warehouse_config, hero_cursor, monkeypatch):
     heroes = dashboard_database.load_hero_statistics(warehouse_config)
     monkeypatch.setenv("WAREHOUSE_PASSWORD", "offline-test-password")
     monkeypatch.setattr(dashboard_database, "load_hero_statistics", MagicMock(return_value=heroes))
+    monkeypatch.setattr(dashboard_database, "load_hero_performance", MagicMock(return_value=None))
+    monkeypatch.setattr(dashboard_database, "load_hero_matchups", MagicMock(return_value=[]))
     monkeypatch.setattr(dashboard_database, "load_default_match_id", MagicMock(
         side_effect=AssertionError("Hero statistics must not query replay data"),
     ))
@@ -292,3 +294,187 @@ def test_populated_hero_page_survives_an_empty_replay_section(hero_app, dashboar
     assert not hero_app.error
     assert hero_app.title[0].value == "Hero statistics"
     assert len(hero_app.dataframe[0].value) == 3
+
+
+def performance_record(database):
+    profile = dict(hero_id=1, appearances=20, wins=12, losses=8, win_rate=0.6, avg_match_duration_s=2000.0)
+    for metric, count in database.HERO_PERFORMANCE_METRICS:
+        profile[metric] = 0.0
+        profile[count] = 20
+    profile.update(avg_gpm=500.0, gpm_observations=10, avg_hero_damage_per_min=None, hero_damage_observations=0)
+    return profile
+
+
+def test_performance_loader_preserves_zero_missing_and_coverage(dashboard_database, warehouse_config, warehouse_cursor):
+    expected = performance_record(dashboard_database)
+    warehouse_cursor.fetchall.return_value = [tuple(expected[column] for column in dashboard_database.HERO_PERFORMANCE_COLUMNS)]
+    assert dashboard_database.load_hero_performance(warehouse_config, 1) == expected
+    sql, parameters = warehouse_cursor.execute.call_args.args
+    assert "marts.hero_performance_summary" in sql
+    assert parameters == (1,)
+
+
+@pytest.mark.parametrize("changes", [
+    {"gpm_observations": 21}, {"gpm_observations": -1}, {"gpm_observations": 0},
+    {"avg_gpm": None}, {"avg_gpm": math.nan}, {"avg_gpm": math.inf}, {"avg_gpm": -1.0},
+    {"wins": 21}, {"losses": 9}, {"win_rate": 0.1}, {"avg_match_duration_s": 0.0},
+])
+def test_performance_loader_rejects_inconsistent_metrics(
+    dashboard_database, warehouse_config, warehouse_cursor, changes,
+):
+    profile = performance_record(dashboard_database)
+    profile.update(changes)
+    warehouse_cursor.fetchall.return_value = [tuple(profile[column] for column in dashboard_database.HERO_PERFORMANCE_COLUMNS)]
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_performance(warehouse_config, 1)
+
+
+def test_performance_loader_handles_missing_and_duplicate_rows(dashboard_database, warehouse_config, warehouse_cursor):
+    warehouse_cursor.fetchall.return_value = []
+    assert dashboard_database.load_hero_performance(warehouse_config, 1) is None
+    profile = performance_record(dashboard_database)
+    row = tuple(profile[column] for column in dashboard_database.HERO_PERFORMANCE_COLUMNS)
+    warehouse_cursor.fetchall.return_value = [row, row]
+    with pytest.raises(dashboard_database.DashboardDatabaseError, match="duplicate"):
+        dashboard_database.load_hero_performance(warehouse_config, 1)
+
+
+def test_performance_profile_shows_coverage_and_preserves_selection(hero_app, dashboard_database):
+    dashboard_database.load_hero_performance.return_value = performance_record(dashboard_database)
+    hero_app.run(timeout=15)
+    assert not hero_app.exception
+    assert not hero_app.error
+    metrics = {metric.label: metric.value for metric in hero_app.metric}
+    assert metrics["Gold / min"] == "500.0"
+    assert metrics["Kills"] == "0.0"
+    assert metrics["Hero damage / min"] == "—"
+    assert any("Recorded in 10 of 20" in caption.value for caption in hero_app.caption)
+    assert any("Recorded in 0 of 20" in caption.value for caption in hero_app.caption)
+    hero_app.number_input(key="hero_stats_minimum_picks").set_value(21).run(timeout=15)
+    assert hero_app.query_params["hero_id"] == "1"
+    assert any(metric.label == "Gold / min" and metric.value == "500.0" for metric in hero_app.metric)
+    hero_app.query_params["hero_id"] = "invalid"
+    dashboard_database.load_hero_performance.reset_mock()
+    hero_app.run(timeout=15)
+    dashboard_database.load_hero_performance.assert_not_called()
+
+
+def test_performance_failure_preserves_pick_statistics(hero_app, dashboard_database):
+    dashboard_database.load_hero_performance.side_effect = dashboard_database.DashboardDatabaseError("missing mart")
+    hero_app.run(timeout=15)
+    assert not hero_app.exception
+    assert not hero_app.error
+    assert "could not be loaded" in hero_app.warning[0].value
+    assert any(metric.label == "Picks" and metric.value == "20" for metric in hero_app.metric)
+    assert len(hero_app.dataframe[0].value) == 3
+
+
+def test_out_of_sync_profile_is_not_displayed(hero_app, dashboard_database):
+    profile = performance_record(dashboard_database)
+    profile["appearances"] = 21
+    dashboard_database.load_hero_performance.return_value = profile
+    hero_app.run(timeout=15)
+    assert not hero_app.exception
+    assert "out of sync" in hero_app.warning[0].value
+    assert not any(metric.label == "Gold / min" for metric in hero_app.metric)
+
+
+def matchup_record(opponent=2, name="Axe", matches=12, wins=8):
+    return dict(hero_id=1, opponent_hero_id=opponent, opponent_name=name, matches=matches,
+                wins=wins, losses=matches - wins, win_rate=wins / matches,
+                overall_matches=20, overall_win_rate=0.6,
+                win_rate_difference_pp=100 * (wins / matches - 0.6))
+
+
+def test_matchup_loader_preserves_zero_rates_and_unknown_names(dashboard_database, warehouse_config, warehouse_cursor):
+    record = matchup_record(3, None, 1, 0)
+    warehouse_cursor.fetchall.return_value = [tuple(record[c] for c in dashboard_database.HERO_MATCHUP_COLUMNS)]
+    result = dashboard_database.load_hero_matchups(warehouse_config, 1)
+    assert result[0]["opponent_label"] == "Hero 3"
+    assert result[0]["win_rate"] == 0.0
+    assert result[0]["win_rate_difference_pp"] == -60.0
+    assert warehouse_cursor.execute.call_args.args[1] == (1,)
+
+
+@pytest.mark.parametrize("changes", [
+    {"matches": 0}, {"matches": 21}, {"wins": 13}, {"losses": 9},
+    {"win_rate": math.nan}, {"overall_win_rate": math.inf}, {"win_rate_difference_pp": 99},
+    {"opponent_hero_id": 1}, {"opponent_hero_id": None}, {"hero_id": 2},
+])
+def test_matchup_loader_rejects_invalid_records(dashboard_database, warehouse_config, warehouse_cursor, changes):
+    record = matchup_record()
+    record.update(changes)
+    warehouse_cursor.fetchall.return_value = [tuple(record[c] for c in dashboard_database.HERO_MATCHUP_COLUMNS)]
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_matchups(warehouse_config, 1)
+
+
+def test_matchup_loader_handles_empty_and_duplicate_opponents(dashboard_database, warehouse_config, warehouse_cursor):
+    warehouse_cursor.fetchall.return_value = []
+    assert dashboard_database.load_hero_matchups(warehouse_config, 1) == []
+    record = matchup_record()
+    row = tuple(record[c] for c in dashboard_database.HERO_MATCHUP_COLUMNS)
+    warehouse_cursor.fetchall.return_value = [row, row]
+    with pytest.raises(dashboard_database.DashboardDatabaseError, match="duplicate"):
+        dashboard_database.load_hero_matchups(warehouse_config, 1)
+
+
+def mocked_matchups(database):
+    records = [matchup_record(3, None, 1, 0), matchup_record()]
+    for record in records:
+        name = record.pop("opponent_name")
+        record["opponent_label"] = name or "Hero 3"
+    database.load_hero_matchups.return_value = records
+    return records
+
+
+def test_matchup_filters_details_and_recovery(hero_app, dashboard_database):
+    mocked_matchups(dashboard_database)
+    hero_app.run(timeout=15)
+    assert not hero_app.exception
+    assert not hero_app.error
+    table = hero_app.dataframe[0].value
+    assert table["Opponent"].tolist() == ["Axe", "Hero 3"]
+    assert table["Matches"].tolist() == [12, 1]
+    hero_app.selectbox(key="hero_matchups_1_opponent").select(3).run(timeout=15)
+    assert any(metric.label == "Matchup win rate" and metric.value == "0.0%" for metric in hero_app.metric)
+    hero_app.number_input(key="hero_matchups_1_minimum").set_value(2).run(timeout=15)
+    assert hero_app.selectbox(key="hero_matchups_1_opponent").value is None
+    assert hero_app.dataframe[0].value["Opponent"].tolist() == ["Axe"]
+    hero_app.text_input(key="hero_matchups_1_search").set_value("nobody").run(timeout=15)
+    assert any("No opponents meet" in notice.value for notice in hero_app.info)
+    assert any(metric.label == "Picks" and metric.value == "20" for metric in hero_app.metric)
+    hero_app.text_input(key="hero_matchups_1_search").set_value(" AXE ").run(timeout=15)
+    assert not hero_app.exception
+    assert hero_app.dataframe[0].value["Opponent"].tolist() == ["Axe"]
+    assert hero_app.query_params["hero_id"] == "1"
+
+
+def test_matchup_failure_and_stale_context_preserve_other_sections(hero_app, dashboard_database):
+    dashboard_database.load_hero_matchups.side_effect = dashboard_database.DashboardDatabaseError("missing mart")
+    hero_app.run(timeout=15)
+    assert not hero_app.exception
+    assert not hero_app.error
+    assert any("Opponent results could not" in notice.value for notice in hero_app.warning)
+    assert hero_app.dataframe[0].value["Hero"].tolist() == ["Axe", "Anti-Mage", "Hero 3"]
+    dashboard_database.load_hero_matchups.side_effect = None
+    records = mocked_matchups(dashboard_database)
+    records[0]["overall_matches"] = 21
+    hero_app.run(timeout=15)
+    assert any("out of sync" in notice.value for notice in hero_app.warning)
+    assert len(hero_app.dataframe) == 1
+
+
+def test_matchup_selection_scoped_to_hero_and_invalid_links_skip_query(hero_app, dashboard_database):
+    records = mocked_matchups(dashboard_database)
+    dashboard_database.load_hero_matchups.side_effect = lambda config, hero_id: records if hero_id == 1 else []
+    hero_app.run(timeout=15)
+    hero_app.selectbox(key="hero_matchups_1_opponent").select(2).run(timeout=15)
+    hero_app.selectbox(key="hero_stats_selected_id").select(2).run(timeout=15)
+    assert not hero_app.exception
+    assert hero_app.query_params["hero_id"] == "2"
+    assert not any(metric.label == "Matchup matches" for metric in hero_app.metric)
+    hero_app.query_params["hero_id"] = "invalid"
+    dashboard_database.load_hero_matchups.reset_mock()
+    hero_app.run(timeout=15)
+    dashboard_database.load_hero_matchups.assert_not_called()

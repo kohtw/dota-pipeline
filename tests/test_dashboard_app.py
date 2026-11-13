@@ -25,6 +25,9 @@ def dashboard_app(dashboard_database, warehouse_config, scoreboard_cursor, monke
     monkeypatch.setattr(dashboard_database, "load_default_match_id", MagicMock(return_value=9000000001))
     monkeypatch.setattr(dashboard_database, "load_available_matches", MagicMock(return_value=[9000000001]))
     monkeypatch.setattr(dashboard_database, "load_hero_statistics", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_hero_performance", MagicMock(return_value=None))
+    monkeypatch.setattr(dashboard_database, "load_hero_matchups", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_team_advantage", MagicMock(return_value=[]))
     monkeypatch.setattr(dashboard_database, "load_scoreboard", MagicMock(return_value=(match, players)))
     monkeypatch.setattr(dashboard_database, "load_player_snapshots", MagicMock(return_value={
         player["slot"]: [

@@ -11,6 +11,7 @@ import streamlit as st
 
 from charts import build_damage_chart, build_progression_chart
 from components import MISSING_VALUE, format_duration, format_items, format_number, format_percentage
+from team_advantage import render_team_advantage
 
 
 TEAM_LABELS = {2: "Radiant", 3: "Dire"}
@@ -43,8 +44,8 @@ def _render_hero_damage(
     """Display full-match hero damage summaries, target bars and source rows."""
     st.subheader("Hero damage dealt")
     st.caption(
-        "Full match. Team share uses all hero damage dealt by the attacker's team. "
-        "Creep and tower damage are excluded."
+        "Full-match recorded damage to heroes, including self-damage such as health sacrificed "
+        "by abilities. Creep and tower damage are excluded."
     )
 
     target_labels = {}
@@ -78,26 +79,39 @@ def _render_hero_damage(
             shares.append(share)
             source = row["source"]
             source_rows.append({
-                "Attacker": label,
-                "Target": target,
+                "Attacker (dealt damage)": label,
+                "Target (received damage)": target,
+                "Damage type": "Self-damage" if target_slot == slot else "Damage to another hero",
                 "Source": "Auto attack" if source == "dota_unknown" else source.replace("_", " ").title(),
                 "Damage": format_number(row["total_damage"]),
                 "Recorded hits": format_number(row["hits"]),
-                "Share of team hero damage": format_percentage(share),
+                "Share of attacker's team damage": format_percentage(share),
             })
 
         # One player's source shares all use the same team total as their denominator.
         summaries.append({
-            "Player": label,
-            "Hero damage dealt": format_number(sum(target_totals.values())),
-            "Share of team hero damage": format_percentage(None if None in shares else fsum(shares)),
+            "Attacker (dealt damage)": label,
+            "Total damage to heroes (includes self)": format_number(sum(target_totals.values())),
+            "Share of own team's hero damage": format_percentage(None if None in shares else fsum(shares)),
         })
         chart_series.append((label, target_totals))
 
     if chart_series:
         st.table(summaries, hide_index=True)
+        st.caption(
+            "Team share = this player's recorded hero damage ÷ their own team's recorded hero damage. "
+            "Opposing players use different team totals; matching percentages need not mean equal damage."
+        )
+        st.markdown("**Who did each player damage?**")
+        st.caption(
+            "Rows are targets receiving damage; colours identify the selected attackers. "
+            "Each bar shows damage dealt by that attacker to that target. Other heroes appear because "
+            "they received damage. A bar on the attacker's own row is self-damage; "
+            "an absent bar means no damage recorded for that pair."
+        )
         st.plotly_chart(build_damage_chart(chart_series), key="hero_damage_by_target")
-        st.caption("Damage by source")
+        st.markdown("**Attack and ability breakdown**")
+        st.caption("Each row identifies who dealt damage, who received it, and the recorded attack or ability.")
         st.table(source_rows, hide_index=True)
 
 
@@ -110,6 +124,7 @@ def render_player_page(
     comparison_snapshots: list[dict] | None = None,
     damage_by_slot: dict[int, list[dict]] | None = None,
     roster: list[dict] | None = None,
+    team_advantage: list[dict] | None = None,
 ) -> None:
     """Display the player page from match records supplied by the app.
 
@@ -125,6 +140,21 @@ def render_player_page(
     match_id = match.get("match_id")
     match_label = str(match_id) if match_id is not None else MISSING_VALUE
     st.caption(f"{team} · Match {match_label}")
+
+    # Team context stays near the top; the same bounds later drive player progression.
+    observations = snapshots or []
+    comparison_observations = comparison_snapshots or []
+    timed_records = list(observations)
+    if comparison_player is not None:
+        timed_records.extend(comparison_observations)
+    timestamps = [record["game_time_s"] for record in timed_records]
+    start = floor(min(0, min(timestamps, default=0)))
+    end = ceil(max(0, match.get("duration_s") or 0, max(timestamps, default=0)))
+    render_team_advantage(
+        team_advantage, match_id,
+        progression_key=f"progression_range_{match_id}_{player['slot']}" if timestamps and end > start else None,
+        progression_bounds=(start, end) if timestamps and end > start else None,
+    )
 
     # Label these as final values so they cannot be confused with measurements
     # at an intermediate game time. Reuse scoreboard formatting to preserve the
@@ -201,17 +231,7 @@ def render_player_page(
             selected_players = [(player["slot"], f"{hero} · {team}")]
         _render_hero_damage(selected_players, damage_by_slot, roster or [])
 
-    # Base the shared clock range on both participants' progression samples.
-    observations = snapshots or []
-    comparison_observations = comparison_snapshots or []
-    timed_records = list(observations)
-    if comparison_player is not None:
-        timed_records.extend(comparison_observations)
-
-    timestamps = [record["game_time_s"] for record in timed_records]
     # Keep whole-second slider bounds while including fractional observations.
-    start = floor(min(0, min(timestamps, default=0)))
-    end = ceil(max(0, match.get("duration_s") or 0, max(timestamps, default=0)))
     if timestamps and end > start:
         start, end = st.slider(
             "Progression time range (seconds)",

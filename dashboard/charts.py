@@ -87,13 +87,52 @@ def build_damage_chart(series: list[tuple[str, dict[str, int]]]) -> go.Figure:
         figure.add_bar(
             name=escape(label), orientation="h", marker_color=color,
             y=target_labels, x=[damage.get(target) for target in targets],
-            hovertemplate="%{y}<br>Damage: %{x:,.0f}<extra>%{fullData.name}</extra>",
+            text=[(f"{damage[target]:,}" + (" (self)" if target == label else ""))
+                  if target in damage else "" for target in targets],
+            texttemplate="%{text}", textposition="outside", cliponaxis=False,
+            customdata=["Self-damage" if target == label else "Damage to target" for target in targets],
+            hovertemplate=("Attacker: " + escape(label)
+                           + "<br>Target: %{y}<br>%{customdata}: %{x:,.0f}<extra></extra>"),
         )
     figure.update_layout(
-        barmode="group", showlegend=len(series) > 1,
-        xaxis={"title": "Damage points", "rangemode": "tozero"},
-        yaxis={"categoryorder": "array", "categoryarray": target_labels, "autorange": "reversed"},
-        margin={"l": 20, "r": 20, "t": 20, "b": 40},
-        height=max(230, 90 + 42 * len(targets)),
+        barmode="group", showlegend=True,
+        legend={"title": {"text": "Attacker (dealt the damage)"}, "orientation": "h",
+                "yanchor": "bottom", "y": 1.05, "x": 0},
+        xaxis={"title": "Damage dealt (points)", "rangemode": "tozero", "tickformat": ",.0f",
+               "showgrid": True},
+        yaxis={"title": "Target receiving damage", "categoryorder": "array",
+               "categoryarray": target_labels, "autorange": "reversed", "automargin": True},
+        margin={"l": 20, "r": 80, "t": 80, "b": 60},
+        height=max(360, 180 + 64 * len(targets)),
+    )
+    return figure
+
+
+def build_team_advantage_chart(records: list[dict], *, change: bool = False) -> go.Figure:
+    """Show the fixed Radiant-minus-Dire convention without bridging missing observations."""
+    metric = "net_worth_advantage_change_120s" if change else "net_worth_advantage"
+    times = [row["observation_time_s"] for row in records]
+    figure = go.Figure(go.Scatter(
+        x=times, y=[row[metric] for row in records], mode="lines+markers", connectgaps=False,
+        line={"color": "#a78bfa", "width": 2}, marker={"size": 4},
+        customdata=[[_clock_label(row["observation_time_s"]),
+                     "—" if row["radiant_net_worth"] is None else f"{row['radiant_net_worth']:,}",
+                     "—" if row["dire_net_worth"] is None else f"{row['dire_net_worth']:,}",
+                     f"{row['radiant_players_observed']}/5 Radiant; {row['dire_players_observed']}/5 Dire"]
+                    for row in records],
+        hovertemplate=("Game time: %{customdata[0]}<br>"
+                       + ("Change over preceding 2 minutes" if change else "Radiant − Dire")
+                       + ": %{y:+,.0f} gold<br>Radiant: %{customdata[1]}<br>Dire: %{customdata[2]}"
+                       + "<br>Coverage: %{customdata[3]}<extra></extra>"),
+    ))
+    ticks = times[::max(1, (len(times) + 5) // 6)]
+    if times and times[-1] not in ticks:
+        ticks.append(times[-1])
+    figure.update_layout(
+        xaxis={"title": "Game time", "tickmode": "array", "tickvals": ticks,
+               "ticktext": [_clock_label(time) for time in ticks]},
+        yaxis={"title": "2-minute change (gold)" if change else "Radiant − Dire net worth (gold)",
+               "tickformat": "+,.0f", "rangemode": "tozero", "zeroline": True, "zerolinewidth": 2},
+        showlegend=False, height=320, margin={"l": 20, "r": 20, "t": 20, "b": 30},
     )
     return figure

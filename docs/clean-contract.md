@@ -136,6 +136,96 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 | `player_timeseries`  | one player at one second            | net worth and XP over time                          |
 | `damage_by_pair`     | attacker, target, source in a match | who damaged whom, and share of team hero damage     |
 | `kill_participation` | one player in one match             | share of team kills the player took part in         |
+| `hero_performance_summary` | one hero in qualifying Steam matches | average combat, economy and contribution metrics with observation counts |
+| `hero_matchup_summary` | one ordered hero/opponent pair in qualifying Steam matches | whole-match results against each enemy hero and overall win-rate context |
+| `team_advantage_timeline` | one replay match at each ten-second observation time | Radiant versus Dire net worth, complete-team coverage and two-minute economic swings |
+
+### `team_advantage_timeline`
+
+**Grain:** one replay match at one aligned game-clock observation time.
+**Key:** `(match_id, observation_time_s)`.
+
+Built from `stg_replay_player_observations`, which selects each roster player's
+latest snapshot at or before each ten-second grid time. The grid begins at zero
+and ends at the last complete ten-second boundary within `matches.duration_s`.
+It does not extend to the last available snapshot when the replay records extra
+time beyond the match duration. Rosters must contain five distinct players per team.
+
+| Column | Type | Built from |
+| ------ | ---- | ---------- |
+| `match_id`, `observation_time_s` | BIGINT, INTEGER | replay ID and requested game-clock grid time |
+| `radiant_net_worth`, `dire_net_worth` | BIGINT, nullable | sum of five usable observations for clean team 2 or 3 |
+| `net_worth_advantage` | BIGINT, nullable | Radiant total minus Dire total; requires both complete totals |
+| `radiant_players_observed`, `dire_players_observed` | BIGINT | usable player observations, from 0 to 5 |
+| `max_snapshot_age_s` | DOUBLE PRECISION, nullable | oldest selected snapshot age, including stale or otherwise unusable values |
+| `net_worth_advantage_change_120s` | BIGINT, nullable | current advantage minus advantage at exactly 120 seconds earlier |
+
+A usable snapshot has non-null, nonnegative net worth and age from zero through
+five seconds inclusive. Never use future snapshots or skip a newer missing value
+to retrieve an older valid one. Pregame snapshots can support time zero under the
+same freshness rule. Recorded zero is valid; missing net worth is not zero.
+
+Incomplete coverage leaves the affected team's total NULL. A complete opposing
+team's total can remain available, but advantage requires both teams. The two-minute
+change is NULL before 120 seconds or when either endpoint is unavailable. Keep
+incomplete grid rows so charts show gaps instead of concealing missing observations.
+
+Positive advantage or change favours Radiant; negative favours Dire. These are
+sampled economic positions and changes, not win probabilities or causal explanations.
+Full alignment rules and the real-data audit are in
+[team-advantage-contract.md](team-advantage-contract.md).
+
+### `hero_performance_summary`
+
+**Grain:** one hero in the ranked All Pick Steam sample. **Key:** `hero_id`.
+
+Built from `stg_steam_ranked`: lobby 7, mode 22, at least 900 seconds, ten human
+players and a known winner. Matches with leavers are kept. Hero names come from a
+left join to `dim_heroes`; missing names do not remove observed heroes.
+
+| Column | Type | Built from |
+| ------ | ---- | ---------- |
+| `hero_id`, `localized_name` | INTEGER, TEXT (nullable name) | Steam hero ID and `dim_heroes` name |
+| `appearances`, `wins`, `losses` | BIGINT | qualifying appearances; wins when `radiant_win = on_radiant`; losses = appearances - wins |
+| `win_rate` | DOUBLE PRECISION | wins / appearances, from 0 to 1 |
+| `avg_kills`, `avg_deaths`, `avg_assists` | DOUBLE PRECISION, nullable | average recorded final K/D/A counts |
+| `avg_gpm`, `avg_xpm` | DOUBLE PRECISION, nullable | average Steam `gold_per_min` and `xp_per_min` |
+| `avg_hero_damage_per_min`, `avg_hero_healing_per_min`, `avg_tower_damage_per_min` | DOUBLE PRECISION, nullable | average of each appearance's source total / (duration / 60.0) |
+| `avg_match_duration_s` | DOUBLE PRECISION | average qualifying match duration in seconds |
+| `kills_observations`, `deaths_observations`, `assists_observations`, `gpm_observations`, `xpm_observations`, `hero_damage_observations`, `hero_healing_observations`, `tower_damage_observations` | BIGINT | non-null observations contributing to each metric |
+
+Missing values stay NULL; recorded zeros count. Each appearance has equal weight,
+including for per-minute metrics. No observations means a NULL average and a zero
+observation count. Counts and win rates use the same population as `hero_pick_win_rate`.
+These are sample descriptions, not causal hero-strength rankings: skill, role,
+duration and game version can affect comparisons. Steam damage totals need not use
+the same inclusion rules as replay damage events. Full column definitions and
+examples are in [hero-performance-contract.md](hero-performance-contract.md).
+
+### `hero_matchup_summary`
+
+**Grain:** one ordered hero/opponent pair in the ranked All Pick Steam sample.
+**Key:** `(hero_id, opponent_hero_id)`.
+
+Built from a self-join of `stg_steam_ranked` on match ID and opposing teams. Uses
+the same qualification rules as the other hero marts; leavers are kept. NULL hero
+IDs cannot form pairs. Unknown hero names do not remove observed pairs.
+
+| Column | Type | Built from |
+| ------ | ---- | ---------- |
+| `hero_id`, `opponent_hero_id` | INTEGER | selected hero and opposing hero IDs from Steam |
+| `hero_name`, `opponent_name` | TEXT, nullable | two left joins to `dim_heroes.localized_name` |
+| `matches`, `wins`, `losses` | BIGINT | distinct match/hero/opponent observations; wins from the selected hero's side; losses = matches - wins |
+| `win_rate` | DOUBLE PRECISION | wins / matches, from 0 to 1 |
+| `overall_matches`, `overall_win_rate` | BIGINT, DOUBLE PRECISION | selected hero's picks and win rate from `hero_pick_win_rate` |
+| `win_rate_difference_pp` | DOUBLE PRECISION | 100 * (win_rate - overall_win_rate), in percentage points |
+
+Reverse pairs are separate rows with equal match counts and opposite outcomes.
+One match contributes several opponent pairs, so their counts must not be summed
+as distinct matches. The overall rate includes the pairing being examined.
+Small samples can give unstable results; these are whole-match team outcomes,
+not lane performance, direct damage or causal counter strength. Full definitions
+and examples are in [hero-matchup-contract.md](hero-matchup-contract.md).
 
 Later: `death_context`, `economy_gap`.
 

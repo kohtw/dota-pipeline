@@ -6,6 +6,144 @@ from config import WarehouseConfig
 from postgres_connection import DashboardDatabaseError, open_postgres_database
 
 
+HERO_PERFORMANCE_METRICS = (
+    ("avg_kills", "kills_observations"),
+    ("avg_deaths", "deaths_observations"),
+    ("avg_assists", "assists_observations"),
+    ("avg_gpm", "gpm_observations"),
+    ("avg_xpm", "xpm_observations"),
+    ("avg_hero_damage_per_min", "hero_damage_observations"),
+    ("avg_hero_healing_per_min", "hero_healing_observations"),
+    ("avg_tower_damage_per_min", "tower_damage_observations"),
+)
+HERO_PERFORMANCE_COLUMNS = (
+    "hero_id", "appearances", "wins", "losses", "win_rate", "avg_match_duration_s",
+    *(column for pair in HERO_PERFORMANCE_METRICS for column in pair),
+)
+
+HERO_MATCHUP_COLUMNS = (
+    "hero_id", "opponent_hero_id", "opponent_name", "matches", "wins", "losses",
+    "win_rate", "overall_matches", "overall_win_rate", "win_rate_difference_pp",
+)
+
+TEAM_ADVANTAGE_COLUMNS = (
+    "observation_time_s", "radiant_net_worth", "dire_net_worth", "net_worth_advantage",
+    "radiant_players_observed", "dire_players_observed", "max_snapshot_age_s",
+    "net_worth_advantage_change_120s",
+)
+
+
+def load_team_advantage(config: WarehouseConfig, match_id: int) -> list[dict]:
+    """Read one replay's complete grid, preserving missing coverage as chart gaps."""
+    if type(match_id) is not int or not 0 < match_id < 2**63:
+        raise DashboardDatabaseError("Choose a valid match to load team advantage.")
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT " + ", ".join(TEAM_ADVANTAGE_COLUMNS)
+            + " FROM marts.team_advantage_timeline WHERE match_id = %s ORDER BY observation_time_s",
+            (match_id,),
+        )
+        rows = cursor.fetchall()
+    records, by_time = [], {}
+    for row in rows:
+        record = dict(zip(TEAM_ADVANTAGE_COLUMNS, row, strict=True))
+        time = record["observation_time_s"]
+        if type(time) is not int or time != len(records) * 10:
+            raise DashboardDatabaseError("The team advantage mart contains an invalid observation grid.")
+        for side in ("radiant", "dire"):
+            count, total = record[side + "_players_observed"], record[side + "_net_worth"]
+            if (type(count) is not int or not 0 <= count <= 5
+                    or (total is None) != (count < 5)
+                    or (total is not None and (type(total) is not int or total < 0))):
+                raise DashboardDatabaseError("The team advantage mart contains invalid team coverage.")
+        radiant, dire = record["radiant_net_worth"], record["dire_net_worth"]
+        advantage = None if radiant is None or dire is None else radiant - dire
+        previous = by_time.get(time - 120)
+        expected_change = None if advantage is None or previous is None else advantage - previous
+        age = record["max_snapshot_age_s"]
+        if (record["net_worth_advantage"] != advantage
+                or record["net_worth_advantage_change_120s"] != expected_change
+                or (age is not None and (not isfinite(age) or age < 0))
+                or (age is None and (record["radiant_players_observed"] or record["dire_players_observed"]))):
+            raise DashboardDatabaseError("The team advantage mart contains inconsistent advantage values.")
+        by_time[time] = advantage
+        records.append(record)
+    return records
+
+
+def load_hero_matchups(config: WarehouseConfig, hero_id: int) -> list[dict]:
+    """Read the selected hero's observed opponents, ordered by sample size."""
+    if type(hero_id) is not int or not 0 < hero_id < 2**31:
+        raise DashboardDatabaseError("Choose a valid hero to load opponent results.")
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT " + ", ".join(HERO_MATCHUP_COLUMNS)
+            + " FROM marts.hero_matchup_summary WHERE hero_id = %s ORDER BY matches DESC, opponent_hero_id",
+            (hero_id,),
+        )
+        rows = cursor.fetchall()
+    matchups, opponents, contexts = [], set(), set()
+    for row in rows:
+        record = dict(zip(HERO_MATCHUP_COLUMNS, row, strict=True))
+        opponent, matches, wins, losses, overall = (
+            record[key] for key in ("opponent_hero_id", "matches", "wins", "losses", "overall_matches")
+        )
+        rate, baseline, difference = (record[key] for key in ("win_rate", "overall_win_rate", "win_rate_difference_pp"))
+        if (record["hero_id"] != hero_id
+                or any(type(value) is not int for value in (opponent, matches, wins, losses, overall))
+                or not 0 < opponent < 2**31 or opponent == hero_id
+                or not 0 < matches <= overall or not 0 <= wins <= matches or losses != matches - wins
+                or any(value is None or not isfinite(value) for value in (rate, baseline, difference))
+                or not 0 <= rate <= 1 or not 0 <= baseline <= 1
+                or abs(rate - wins / matches) > 0.000001
+                or abs(difference - 100 * (rate - baseline)) > 0.000001):
+            raise DashboardDatabaseError("The hero matchup mart contains invalid counts or rates.")
+        if opponent in opponents:
+            raise DashboardDatabaseError("The hero matchup mart contains duplicate opponents.")
+        opponents.add(opponent)
+        contexts.add((overall, baseline))
+        name = record.pop("opponent_name")
+        record["opponent_label"] = name.strip() if isinstance(name, str) and name.strip() else f"Hero {opponent}"
+        matchups.append(record)
+    if len(contexts) > 1:
+        raise DashboardDatabaseError("The hero matchup mart contains inconsistent overall context.")
+    return matchups
+
+
+def load_hero_performance(config: WarehouseConfig, hero_id: int) -> dict | None:
+    """Read one selected hero's profile; missing rows are not fabricated as zeros."""
+    if type(hero_id) is not int or not 0 < hero_id < 2**31:
+        raise DashboardDatabaseError("Choose a valid hero to load its performance profile.")
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT " + ", ".join(HERO_PERFORMANCE_COLUMNS)
+            + " FROM marts.hero_performance_summary WHERE hero_id = %s",
+            (hero_id,),
+        )
+        rows = cursor.fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise DashboardDatabaseError("The hero performance mart contains duplicate hero IDs.")
+    profile = dict(zip(HERO_PERFORMANCE_COLUMNS, rows[0], strict=True))
+    appearances, wins, losses = (profile[key] for key in ("appearances", "wins", "losses"))
+    rate, duration = profile["win_rate"], profile["avg_match_duration_s"]
+    if (profile["hero_id"] != hero_id
+            or any(type(value) is not int for value in (appearances, wins, losses))
+            or appearances <= 0 or not 0 <= wins <= appearances or losses != appearances - wins
+            or rate is None or not isfinite(rate) or not 0 <= rate <= 1
+            or abs(rate - wins / appearances) > 0.000001
+            or duration is None or not isfinite(duration) or duration < 900):
+        raise DashboardDatabaseError("The hero performance mart contains invalid outcomes or duration.")
+    for metric, count_column in HERO_PERFORMANCE_METRICS:
+        average, count = profile[metric], profile[count_column]
+        if (type(count) is not int or not 0 <= count <= appearances
+                or (count == 0) != (average is None)
+                or (average is not None and (not isfinite(average) or average < 0))):
+            raise DashboardDatabaseError("The hero performance mart contains invalid metrics or observation counts.")
+    return profile
+
+
 def load_hero_statistics(config: WarehouseConfig) -> list[dict]:
     """Read one row per observed hero, retaining the mart's dataset-wide denominator."""
     with open_postgres_database(config) as connection, connection.cursor() as cursor:
