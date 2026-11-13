@@ -2,6 +2,7 @@
 
 import io
 import os
+from functools import cache
 
 import boto3
 import requests
@@ -15,6 +16,9 @@ from dota.errors import PermanentError, is_transient_status, redact
 DEM_MAGIC = b"PBDEMS2\0"  # first bytes of every Source 2 replay
 
 
+# one client per process: building one loads boto3's service model each time, and a task like
+# check_contract calls this per object. boto3 clients are thread-safe, and the env never changes.
+@cache
 def client():
     return boto3.client(
         "s3",
