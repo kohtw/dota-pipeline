@@ -1,9 +1,9 @@
 """
 dbt stage: build the marts schema from the warehouse `clean` schema with `dbt build`.
 
-Asset-triggered: it runs whenever the load DAG produces CLEAN_LOADED (fresh rows in the warehouse
-`clean` schema), so the marts refresh follows the load without polling on a timer. This is the last
-stage of the chain:
+Asset-triggered: it runs whenever a load produces CLEAN_LOADED (fresh rows in the warehouse `clean`
+schema) or STEAM_LOADED (fresh stg.steam_* rows), so the marts refresh follows the load without
+polling on a timer. This is the last stage of the chain:
 
   parse -> RAW_PARSED -> clean -> CLEAN_READY -> load -> CLEAN_LOADED -> dbt_build (here)
 
@@ -23,6 +23,7 @@ import subprocess
 from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
+from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, STEAM_LOADED
@@ -71,6 +72,9 @@ def dbt_build():
         )
         print(result.stdout)
         print(result.stderr)
+        # exit 1 is a model or test failure, which a rerun repeats; 2 is an error such as a lost connection
+        if result.returncode == 1:
+            raise AirflowFailException("dbt build failed (exit 1)")
         if result.returncode != 0:
             raise RuntimeError(f"dbt build failed (exit {result.returncode})")
 

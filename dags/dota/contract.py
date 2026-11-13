@@ -9,6 +9,8 @@ import io
 import re
 from typing import Callable
 
+from dota import attempts
+
 COMPLETE = "_complete"  # marker dataset, written after all tables
 
 # Required columns only: the contract allows new columns, so extra ones are fine.
@@ -75,9 +77,11 @@ def check_table(name: str, table, match_id: int) -> int:
     return rows
 
 
-def unparsed(replay_keys: list[str], parsed_keys: list[str]) -> list[int]:
+def unparsed(replay_keys: list[str], parsed_keys: list[str],
+             failed_keys: list[str] | tuple[str, ...] = ()) -> list[int]:
     """Match ids that have a replay but no _complete marker, newest first. A parse that died
-    halfway wrote no marker, so it counts as unparsed and runs again."""
+    halfway wrote no marker, so it counts as unparsed and runs again, until it has failed in
+    attempts.MAX_ATTEMPTS runs."""
     replays = {int(k.removeprefix("replays/").removesuffix(".dem"))
                for k in replay_keys if k.startswith("replays/") and k.endswith(".dem")}
     complete = set()
@@ -85,7 +89,7 @@ def unparsed(replay_keys: list[str], parsed_keys: list[str]) -> list[int]:
         m = re.match(rf"parsed/{COMPLETE}/match_id=(\d+)/", key)
         if m:
             complete.add(int(m.group(1)))
-    return sorted(replays - complete, reverse=True)
+    return sorted(replays - complete - attempts.exhausted(list(failed_keys), "parsed"), reverse=True)
 
 
 def check_parsed(match_id: int, read: Callable[[str], bytes],

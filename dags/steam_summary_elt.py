@@ -1,9 +1,12 @@
 """
-Steam load: flatten the raw Steam pages that the daily download saved in Garage (steam_raw/) and
-load them into the warehouse tables stg.steam_matches / stg.steam_players. Python only flattens and
-inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
+Steam load: flatten the raw Steam pages that steam_fetch and the daily download saved in Garage
+(steam_raw/) and load them into the warehouse tables stg.steam_matches / stg.steam_players /
+stg.steam_picks_bans.
+Python only flattens and inserts; every rule (ranked All Pick, minimum duration, rates) lives in dbt.
+Each match row records its page key (source_page) and load time (loaded_at). See docs/steam-lane.md.
 
-Runs daily (no asset trigger). Like the other sweeps it works from what is in Garage: a page is
+Runs when new pages land (STEAM_RAW, from steam_fetch and the daily download) and daily at
+17:00 UTC. Like the other sweeps it works from what is in Garage: a page is
 skipped only once its steam_raw/_loaded/ marker exists, and the marker is written AFTER that page's
 load commits. A page that died before its marker is loaded again, which is safe because load_steam
 is idempotent (delete the batch's matches, insert, one transaction). Pages go in sequence order so
@@ -25,19 +28,19 @@ Without the mount the load task fails on every run.
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import dag, task
+from airflow.sdk import AssetOrTimeSchedule, CronTriggerTimetable, dag, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import STEAM_LOADED
+from dota.assets import STEAM_LOADED, STEAM_RAW
 from dota.config import WAREHOUSE_INIT_DIR
 
-BATCH = 20  # pages per run; the rest wait for the next run
+BATCH = 50  # pages per run; covers a 40-page steam_fetch run, so one load keeps up with each fetch
 DDL_PATH = WAREHOUSE_INIT_DIR / "04_steam_tables.sql"
 
 
 @dag(
-    schedule="@daily",
+    schedule=AssetOrTimeSchedule(timetable=CronTriggerTimetable("0 17 * * *", timezone="UTC"), assets=STEAM_RAW),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,
@@ -69,7 +72,8 @@ def steam_summary_elt():
         try:
             loaded, failed = steam_summary.load_pages_isolated(
                 page_keys, storage.read,
-                lambda matches, players: steam_summary.load_steam(matches, players, conn, ddl=ddl),
+                lambda matches, players, **page: steam_summary.load_steam(
+                    matches, players, conn, ddl=ddl, **page),
                 lambda key: storage.put(steam_summary.loaded_marker_key(key)))
         finally:
             conn.close()
