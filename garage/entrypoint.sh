@@ -3,6 +3,9 @@
 # Each step tolerates "already done" so restarts are safe.
 set -e
 
+# a restarted container keeps /tmp, so a stale flag would pass the healthcheck before bootstrap
+rm -f /tmp/ready
+
 garage server &
 SERVER=$!
 
