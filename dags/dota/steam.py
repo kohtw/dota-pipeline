@@ -51,11 +51,14 @@ def newest_seq() -> int:
 
 
 def ranked_all_pick_from(seq: int, n: int, save_page: Callable[[int, dict], None] | None = None,
-                         max_pages: int = MAX_PAGES) -> list[int]:
-    """First n ranked All Pick match ids that ended at or after seq. If save_page is given it is
-    called with (start_seq, raw result dict) for every page fetched."""
+                         max_pages: int = MAX_PAGES, *, sleep: Callable[[float], None] = time.sleep,
+                         pace_s: float = 2.0) -> list[int]:
+    """First n ranked All Pick match ids that ended at or after seq, waiting pace_s between pages.
+    If save_page is given it is called with (start_seq, raw result dict) for every page fetched."""
     ids = []
-    for _ in range(max_pages):
+    for i in range(max_pages):
+        if i:
+            sleep(pace_s)
         page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
         if save_page:
             save_page(seq, page)
