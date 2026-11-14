@@ -83,7 +83,7 @@ def dota_daily_download():
         from dota.errors import PermanentError
 
         get_current_context()["batch_label"] = f"{match_ids[0]}..{match_ids[-1]}"
-        downloaded, queued, broken = 0, 0, []
+        downloaded, present, queued, broken = 0, 0, 0, []
         conn = warehouse.connect()
         try:
             for match_id in match_ids:
@@ -95,7 +95,10 @@ def dota_daily_download():
                     broken.append(match_id)
                     continue
                 if ok:
-                    downloaded += 1
+                    if message.endswith("already in Garage"):  # see ingest.try_download
+                        present += 1
+                    else:
+                        downloaded += 1
                     print(f"{match_id}: {message}")
                 else:
                     ingest.enqueue(conn, match_id, datetime.fromisoformat(day).date(), message)
@@ -103,7 +106,8 @@ def dota_daily_download():
                     print(f"{match_id}: queued for download_pending: {message}")
         finally:
             conn.close()
-        summary = f"{downloaded} downloaded, {queued} queued, {len(broken)} failed of {len(match_ids)}"
+        summary = (f"{downloaded} downloaded, {present} already in Garage, {queued} queued, "
+                   f"{len(broken)} failed of {len(match_ids)}")
         print(summary)
         if broken:
             raise RuntimeError(f"{summary}; failed: {broken}")
