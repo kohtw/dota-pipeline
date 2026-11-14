@@ -6,9 +6,10 @@ from dota.errors import PermanentError
 
 
 class Resp:
-    def __init__(self, status, body=None):
+    def __init__(self, status, body=None, headers=None):
         self.status_code, self.ok = status, status < 400
         self._body = body or {}
+        self.headers = headers or {}
 
     def json(self):
         return self._body
@@ -26,14 +27,22 @@ def slept(monkeypatch):
 def fake_http(monkeypatch):
     posted = []
 
-    def use(outcome):
+    def use(outcome, fetch=None):
+        """outcome: the GET response or exception, or a list of them in order. fetch: the POST response."""
+        outcomes = outcome if isinstance(outcome, list) else None
+
         def get(*a, **k):
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
+            result = outcomes.pop(0) if outcomes is not None else outcome
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def post(url, **k):
+            posted.append(url)
+            return fetch or Resp(200)
 
         monkeypatch.setattr(opendota.requests, "get", get)
-        monkeypatch.setattr(opendota.requests, "post", lambda url, **k: posted.append(url))
+        monkeypatch.setattr(opendota.requests, "post", post)
         return posted
 
     return use
@@ -80,3 +89,29 @@ def test_waits_after_every_call_to_stay_at_50_a_minute(fake_http, slept):
     with pytest.raises(RuntimeError):
         opendota.replay_url(1)
     assert slept == [60 / 50] * 2  # the match lookup and the fetch request
+
+
+def test_429_waits_5_minutes_then_tries_again(fake_http, slept):
+    fake_http([Resp(429), Resp(200, {"replay_url": "http://replay1.valve.net/570/1_2.dem.bz2"})])
+    assert opendota.replay_url(1) == "http://replay1.valve.net/570/1_2.dem.bz2"
+    assert slept == [opendota.PACE_S, 300, opendota.PACE_S]
+
+
+def test_429_honours_retry_after(fake_http, slept):
+    fake_http([Resp(429, headers={"Retry-After": "42"}), Resp(200, {"replay_url": "u"})])
+    opendota.replay_url(1)
+    assert 42 in slept
+
+
+def test_429_gives_up_after_three_tries(fake_http, slept):
+    fake_http([Resp(429)] * 3)
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        opendota.replay_url(1)
+    assert slept.count(300) == 2
+
+
+def test_rate_limited_fetch_request_is_reported_as_429_not_as_requested(fake_http):
+    fake_http(Resp(404), fetch=Resp(429))
+    with pytest.raises(RuntimeError, match="fetch request for 1 failed: HTTP 429") as err:
+        opendota.replay_url(1)
+    assert not isinstance(err.value, PermanentError)

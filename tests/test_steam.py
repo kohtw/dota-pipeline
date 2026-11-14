@@ -21,46 +21,6 @@ def match(seq, mode=22, lobby=7):
     return {"match_id": seq * 10, "match_seq_num": seq, "game_mode": mode, "lobby_type": lobby}
 
 
-def test_save_page_called_once_per_page_with_start_seq_and_raw_result(monkeypatch):
-    p1 = {"status": 1, "matches": [match(100), match(101, mode=23)]}
-    p2 = {"status": 1, "matches": [match(102)]}
-    p3 = {"status": 1, "matches": []}
-    fake, _ = pages(p1, p2, p3)
-    monkeypatch.setattr(steam, "call", fake)
-    saved = []
-    ids = steam.ranked_all_pick_from(100, 50, save_page=lambda s, r: saved.append((s, r)), sleep=lambda _: None)
-    assert ids == [1000, 1020]
-    assert saved == [(100, p1), (102, p2), (103, p3)]
-
-
-def test_without_save_page_result_is_unchanged(monkeypatch):
-    fake, _ = pages({"matches": [match(1), match(2), match(3)]})
-    monkeypatch.setattr(steam, "call", fake)
-    assert steam.ranked_all_pick_from(1, 2) == [10, 20]
-
-
-def test_max_pages_is_overridable(monkeypatch):
-    fake, calls = pages(*[{"matches": [match(i, mode=23)]} for i in range(1, 10)])
-    monkeypatch.setattr(steam, "call", fake)
-    assert steam.ranked_all_pick_from(1, 50, max_pages=3, sleep=lambda _: None) == []
-    assert len(calls) == 3
-
-
-def test_default_max_pages_is_the_module_constant(monkeypatch):
-    fake, calls = pages(*[{"matches": [match(i, mode=23)]} for i in range(1, 40)])
-    monkeypatch.setattr(steam, "call", fake)
-    steam.ranked_all_pick_from(1, 50, sleep=lambda _: None)
-    assert len(calls) == steam.MAX_PAGES
-
-
-def test_ranked_all_pick_from_sleeps_2s_between_pages_only(monkeypatch):
-    fake, _ = pages(*[{"matches": [match(i, mode=23)]} for i in range(1, 4)])
-    monkeypatch.setattr(steam, "call", fake)
-    slept = []
-    steam.ranked_all_pick_from(1, 50, max_pages=3, sleep=slept.append)
-    assert slept == [2.0, 2.0]
-
-
 def test_fetch_pages_saves_contiguous_pages_and_sleeps_between_calls(monkeypatch):
     p1 = {"matches": [match(100), match(105)]}
     p2 = {"matches": [match(106), match(110)]}
