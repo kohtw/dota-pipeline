@@ -2,8 +2,10 @@
 bookmark per day, and the queue of matches whose replay could not be downloaded yet. Callers pass a
 live DB connection (dota.warehouse.connect); every function commits its own change."""
 
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 
+SGT = timezone(timedelta(hours=8))  # a "day" is a Singapore calendar day, starting at 00:00 SGT
 RETRY_EVERY = timedelta(hours=1)  # download_pending runs hourly
 # Valve deletes replays after roughly 1-2 weeks, so a match not ready in 5 days likely never will be
 GIVE_UP_AFTER = timedelta(days=5)
@@ -93,3 +95,23 @@ def mark_failed(conn, match_id: int, error: str, now: datetime | None = None) ->
                    "gave_up_at = %s WHERE match_id = %s",
              (attempts + 1, error, now + RETRY_EVERY, now if gave_up else None, match_id))
     return gave_up
+
+
+def day_of(run_after: datetime, override: str | None = None) -> date:
+    """The day a run works on: `override` (YYYY-MM-DD) when given, else run_after's SGT date."""
+    return date.fromisoformat(override) if override else run_after.astimezone(SGT).date()
+
+
+def try_download(match_id: int, *, replay_url: Callable[[int], str], exists: Callable[[str], bool],
+                 upload: Callable[[str, str], None]) -> tuple[bool, str]:
+    """Downloads one replay into Garage unless it is there already. Returns (True, what happened),
+    or (False, the error) when a later try may succeed: OpenDota has no replay_url yet, a rate limit,
+    a 5xx. A PermanentError is not a RuntimeError, so it propagates and fails the task."""
+    key = f"replays/{match_id}.dem"
+    if exists(key):
+        return True, f"{key} already in Garage"
+    try:
+        upload(replay_url(match_id), key)
+    except RuntimeError as e:
+        return False, str(e)
+    return True, f"downloaded {key}"

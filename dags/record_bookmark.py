@@ -15,7 +15,6 @@ from dota.alerts import ALERT_CALLBACKS
 from dota.assets import BOOKMARKED
 from dota.config import API_RETRY, WAREHOUSE_INIT_DIR
 
-SGT = timezone(timedelta(hours=8))
 LEGACY_BOOKMARK = "dota_seq_bookmark"  # Airflow Variable the download used before ingest.bookmarks
 
 
@@ -31,9 +30,7 @@ def record_bookmark():
     def record() -> int:
         from dota import ingest, steam, warehouse
 
-        context = get_current_context()
-        # manual runs have no logical date in Airflow 3
-        day = (context["logical_date"] or context["dag_run"].run_after).astimezone(SGT).date()
+        day = ingest.day_of(get_current_context()["dag_run"].run_after)
         conn = warehouse.connect()
         try:
             warehouse.apply_init_sql(WAREHOUSE_INIT_DIR, conn)  # creates ingest.* on an older volume

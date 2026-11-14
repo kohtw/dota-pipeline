@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta
 
+import pytest
+
 from dota import ingest
 
 DAY = date(2026, 11, 14)
@@ -105,3 +107,41 @@ def test_mark_done_sets_done_at():
     conn = FakeConn()
     ingest.mark_done(conn, 7, NOW)
     assert conn.writes() == [("UPDATE", (NOW, 7))]
+
+
+def test_day_of_uses_the_sgt_date_or_the_override():
+    late_utc = datetime(2026, 11, 14, 16, 5, tzinfo=ingest.timezone.utc)  # 00:05 SGT on the 15th
+    assert ingest.day_of(late_utc) == date(2026, 11, 15)
+    assert ingest.day_of(late_utc, "2026-11-10") == date(2026, 11, 10)
+
+
+def download(present=(), url_error=None):
+    uploaded = []
+
+    def replay_url(match_id):
+        if url_error:
+            raise url_error
+        return f"http://replay/{match_id}"
+
+    result = ingest.try_download(7, replay_url=replay_url, exists=lambda k: k in present,
+                                 upload=lambda url, key: uploaded.append((url, key)))
+    return result, uploaded
+
+
+def test_try_download_uploads_a_new_replay():
+    assert download() == ((True, "downloaded replays/7.dem"), [("http://replay/7", "replays/7.dem")])
+
+
+def test_try_download_skips_a_replay_already_in_garage():
+    assert download(present={"replays/7.dem"}) == ((True, "replays/7.dem already in Garage"), [])
+
+
+def test_try_download_returns_a_retryable_error_instead_of_raising():
+    assert download(url_error=RuntimeError("no replay_url for 7 yet")) == ((False, "no replay_url for 7 yet"), [])
+
+
+def test_try_download_lets_a_permanent_error_fail_the_task():
+    from dota.errors import PermanentError
+
+    with pytest.raises(PermanentError):
+        download(url_error=PermanentError("HTTP 400"))
