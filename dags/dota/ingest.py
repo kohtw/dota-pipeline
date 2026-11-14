@@ -1,0 +1,85 @@
+"""Ingestion state in the warehouse `ingest` schema (warehouse/init/05_ingest_tables.sql): one Steam
+bookmark per day, and the queue of matches whose replay could not be downloaded yet. Callers pass a
+live DB connection (dota.warehouse.connect); every function commits its own change."""
+
+from datetime import date, datetime, timedelta, timezone
+
+RETRY_EVERY = timedelta(hours=1)  # download_pending runs hourly
+# Valve deletes replays after roughly 1-2 weeks, so a match not ready in 5 days likely never will be
+GIVE_UP_AFTER = timedelta(days=5)
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)  # the columns are TIMESTAMP, in UTC
+
+
+def _execute(conn, sql: str, params: tuple, fetch: str | None = None):
+    cur = conn.cursor()
+    try:
+        cur.execute(sql, params)
+        result = cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def record_bookmark(conn, day: date, seq: int, now: datetime | None = None) -> int:
+    """Saves seq as day's bookmark unless the day already has one, and returns the day's bookmark.
+    A rerun keeps the first value, so the day's window never moves."""
+    row = _execute(conn, "SELECT match_seq_num FROM ingest.bookmarks WHERE day = %s", (day,), "one")
+    if row:
+        return row[0]
+    _execute(conn, "INSERT INTO ingest.bookmarks (day, match_seq_num, recorded_at) VALUES (%s, %s, %s)",
+             (day, seq, now or utcnow()))
+    return seq
+
+
+def window(conn, day: date) -> tuple[int, int] | None:
+    """(start, end) seq nums of day's download: the latest bookmark before day, and day's own.
+    None until both exist. After a missed day the window simply covers both days."""
+    rows = _execute(conn, "SELECT day, match_seq_num FROM ingest.bookmarks WHERE day <= %s "
+                          "ORDER BY day DESC LIMIT 2", (day,), "all")
+    if len(rows) < 2 or rows[0][0] != day:
+        return None
+    return rows[1][1], rows[0][1]
+
+
+def enqueue(conn, match_id: int, day: date, error: str, now: datetime | None = None) -> None:
+    """Queues a match whose download failed, for download_pending to retry. A match that is
+    already queued is left as it is."""
+    if _execute(conn, "SELECT 1 FROM ingest.download_queue WHERE match_id = %s", (match_id,), "one"):
+        return
+    now = now or utcnow()
+    _execute(conn, "INSERT INTO ingest.download_queue (match_id, day, attempts, last_error, added_at, "
+                   "next_try_at) VALUES (%s, %s, %s, %s, %s, %s)",
+             (match_id, day, 1, error, now, now + RETRY_EVERY))
+
+
+def due(conn, now: datetime | None = None, limit: int = 50) -> list[int]:
+    """Queued match ids whose next try is due, oldest first."""
+    rows = _execute(conn, "SELECT match_id FROM ingest.download_queue WHERE done_at IS NULL "
+                          "AND gave_up_at IS NULL AND next_try_at <= %s ORDER BY next_try_at LIMIT %s",
+                    (now or utcnow(), limit), "all")
+    return [r[0] for r in rows]
+
+
+def mark_done(conn, match_id: int, now: datetime | None = None) -> None:
+    _execute(conn, "UPDATE ingest.download_queue SET done_at = %s WHERE match_id = %s",
+             (now or utcnow(), match_id))
+
+
+def mark_failed(conn, match_id: int, error: str, now: datetime | None = None) -> bool:
+    """Records another failed try and schedules the next one, or gives up once the match has been
+    queued for GIVE_UP_AFTER. Returns True when it gave up."""
+    now = now or utcnow()
+    added_at, attempts = _execute(conn, "SELECT added_at, attempts FROM ingest.download_queue "
+                                        "WHERE match_id = %s", (match_id,), "one")
+    gave_up = now - added_at >= GIVE_UP_AFTER
+    _execute(conn, "UPDATE ingest.download_queue SET attempts = %s, last_error = %s, next_try_at = %s, "
+                   "gave_up_at = %s WHERE match_id = %s",
+             (attempts + 1, error, now + RETRY_EVERY, now if gave_up else None, match_id))
+    return gave_up
