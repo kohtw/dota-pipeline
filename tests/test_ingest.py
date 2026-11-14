@@ -51,6 +51,18 @@ def test_record_bookmark_keeps_the_first_value_on_a_rerun():
     assert conn.writes() == []
 
 
+def test_seed_bookmark_saves_only_into_an_empty_table():
+    conn = FakeConn(None, None)  # table empty, then no bookmark for the day
+    assert ingest.seed_bookmark(conn, DAY, 100, NOW) is True
+    assert conn.writes() == [("INSERT", (DAY, 100, NOW))]
+
+
+def test_seed_bookmark_does_nothing_once_any_bookmark_exists():
+    conn = FakeConn((1,))
+    assert ingest.seed_bookmark(conn, DAY, 100, NOW) is False
+    assert conn.writes() == []
+
+
 def test_window_runs_from_the_previous_bookmark_to_the_days_own():
     conn = FakeConn([(DAY, 300), (DAY - timedelta(days=2), 100)])  # a missed day widens the window
     assert ingest.window(conn, DAY) == (100, 300)

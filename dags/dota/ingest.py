@@ -38,6 +38,16 @@ def record_bookmark(conn, day: date, seq: int, now: datetime | None = None) -> i
     return seq
 
 
+def seed_bookmark(conn, day: date, seq: int, now: datetime | None = None) -> bool:
+    """Saves seq as day's bookmark only while ingest.bookmarks is empty: the one-off switch from the
+    old Airflow Variable, so the first window starts where the old download stopped. Returns True
+    when it saved."""
+    if _execute(conn, "SELECT 1 FROM ingest.bookmarks LIMIT 1", (), "one"):
+        return False
+    record_bookmark(conn, day, seq, now)
+    return True
+
+
 def window(conn, day: date) -> tuple[int, int] | None:
     """(start, end) seq nums of day's download: the latest bookmark before day, and day's own.
     None until both exist. After a missed day the window simply covers both days."""
