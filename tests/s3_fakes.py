@@ -55,25 +55,13 @@ class FakeS3:
 
 
 class Clock:
-    """Wall and monotonic clocks that advance together on sleep. jump() steps only the wall clock,
-    as NTP or a VM resync would."""
+    """A wall clock that moves only when a test moves it."""
 
     def __init__(self, t=1_800_000_000.0):
-        self.t, self.m, self.sleeps = t, 0.0, []
+        self.t = t
 
     def now(self):
         return self.t
 
-    def mono(self):
-        return self.m
-
-    def sleep(self, s):
-        self.sleeps.append(s)
-        self.advance(s)
-
     def advance(self, s):
-        self.t += s
-        self.m += s
-
-    def jump(self, s):
         self.t += s

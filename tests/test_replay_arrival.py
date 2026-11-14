@@ -45,6 +45,15 @@ def test_download_pending_emits_an_arrival_per_batch():
     assert keyword(task_decorator("download_pending.py", "download_replays"), "outlets") == "[REPLAYS_ARRIVED]"
 
 
+def test_each_cold_release_waits_on_its_own_time_and_emits_an_arrival():
+    release = task_decorator("cold_restore.py", "release")
+    assert keyword(release, "outlets") == "[REPLAYS_ARRIVED]"
+    assert keyword(release, "max_active_tis_per_dagrun") == "PARALLEL_RELEASES"
+    (wait,) = named("cold_restore.py", "DateTimeSensorAsync")
+    assert keyword(wait, "target_time") == "scheduled_at"
+    assert named("cold_restore.py", "release_one.expand_kwargs")  # wait i -> release i, per replay
+
+
 @pytest.fixture
 def assets(monkeypatch):
     class StubAsset:
