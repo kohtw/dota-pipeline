@@ -1,0 +1,124 @@
+# Cold storage
+
+The cold store is an archive of compressed replays in an S3-compatible bucket. The `cold_restore`
+DAG releases replays from it back into Garage's hot `replays/` prefix on a timed schedule.
+
+**Ingest stays API → Garage.** `dota_daily_download` is the only ingest path. The cold store is
+for reprocessing and for burst and replay tests. The collector's Google Drive stockpile is imported
+once, as a seed. Nothing reads from Drive in the pipeline.
+
+## Why
+
+- Valve deletes replays after about two weeks. After that, a match can only be parsed again from a copy.
+- Parser or clean changes need old matches parsed again. The hot `replays/*.dem` may be gone by then
+  (`dem_retention`).
+- Load tests need replays that arrive at a known rate, faster than live, with real timing.
+
+## Layout
+
+Bucket and prefix are configurable. The defaults are the raw bucket (`raw`) and prefix `cold/`.
+
+```
+cold/replays/{match_id}.dem.zst     replay, zstd as Valve serves it (about 37 MB)
+cold/manifest.jsonl                 one line per match
+cold/restore_log/{run_id}.jsonl     one line per release, written by cold_restore
+```
+
+A manifest line:
+
+```json
+{"match_id": 9069761188, "match_seq_num": 7616367185, "start_time": 1793442909, "duration": 2342,
+ "end_time": 1793445251, "bytes": 30092593, "sha256": "…"}
+```
+
+Times are unix seconds, and `end_time = start_time + duration`. `bytes` and `sha256` describe the
+`.dem.zst` file. There is one line per `match_id`. Seeding a match again replaces its line.
+
+The code lives in `dags/dota/cold.py`, which covers the layout, the manifest, the schedule and the
+release. It works with any S3-compatible store and knows nothing about Drive.
+
+## Seeding (one time, on the host)
+
+`downloader/seed_cold_store.py` sits beside the collector, because it is the only part that uses
+rclone and Drive. It picks `--count` matches that the collector uploaded (`status = 'uploaded'`
+in `~/.local/share/dota-pipeline/state.db`). The matches are consecutive in `match_seq_num`, so the
+gaps between their real end times are kept. By default it starts just after the newest match
+already in the manifest. Each match's `start_time` and `duration` come from its saved Steam page.
+A match that is missing from its page is skipped with a warning; its duration is never guessed.
+Each replay is downloaded with rclone and checked: it must be one complete zstd frame that holds a
+Dota 2 replay. The replay is then uploaded unchanged, and the manifest is merged. The staging
+folder is deleted afterwards.
+
+With the stack up, from the repo root (the local keys are the `x-s3-creds` in `docker-compose.yml`):
+
+```
+export S3_ACCESS_KEY=... S3_SECRET_KEY=...       # S3_ENDPOINT defaults to http://127.0.0.1:3900
+uv run --no-project --with boto3 --with zstandard --with requests \
+    python downloader/seed_cold_store.py --count 30 --dry-run
+uv run --no-project --with boto3 --with zstandard --with requests \
+    python downloader/seed_cold_store.py --count 30
+```
+
+Flags:
+
+- `--start-seq`: the first `match_seq_num` to consider.
+- `--remote`: the rclone path that holds `steam/` and `replays/`. The default is `DRIVE_DEST`.
+- `--state-db`: the collector's SQLite state file.
+- `--bucket` and `--prefix`: where the cold store is.
+- `--staging`: the parent folder for the staging folder.
+- `--keep-staging`: keep the staging folder after the run.
+- `--steam-listing` and `--replay-listing`: saved `rclone lsf --format ps` output. Listing `steam/`
+  on Drive takes about a minute, and these flags skip it.
+- `--dry-run`: prints the selection and sizes. It fetches only the small Steam pages and writes nothing.
+
+## Restoring
+
+Trigger `cold_restore` by hand. It has no schedule. Like every new DAG it starts paused, and a
+paused DAG leaves triggered runs queued, so unpause it first. Unpausing it starts nothing.
+
+| param | default | meaning |
+|---|---|---|
+| `count` | 30 | replays to release: the next ones in `end_time` order |
+| `speed` | 1.0 | multiplies the rate |
+| `rate_per_min` | 2.0 | base rate. 2 a minute is the measured live rate through the APIs |
+| `spacing` | `event` | `event` keeps the real end-time gaps, scaled to a mean of `rate_per_min * speed`. `uniform` releases one every `1 / (rate_per_min * speed)` minutes |
+| `start_after_match_id` | none | start after this match in `end_time` order |
+| `cold_bucket`, `cold_prefix` | `raw`, `cold/` | where the cold store is |
+
+Offsets are measured from the start of the run. For `event` spacing, the offset of replay i is
+`(end_i - end_0) / (end_last - end_0) * (count - 1) / (rate_per_min * speed)` minutes. If all the
+replays ended in the same second, the DAG uses `uniform` spacing instead.
+
+```
+docker compose exec airflow-scheduler airflow dags trigger cold_restore \
+    --conf '{"count": 30, "speed": 10, "spacing": "event"}'
+```
+
+Each release streams the cold object and decompresses it. The replay is written to
+`replays/{match_id}.dem` the same way `dota_daily_download` writes it: the header must be a Dota 2
+replay, and the object only appears once it is complete. The sha256 is checked before the upload
+finishes, so a damaged archive never shows up in `replays/`. A replay already in `replays/` is
+skipped. A replay that fails is logged and the rest still run. The task fails at the end if any
+replay failed. It does not retry, because a retry would start the schedule over. `parse_pending`
+picks restored replays up like any others. The run emits the asset `replays_restored`
+(`s3://raw/replays`). No DAG is scheduled on that asset yet.
+
+The task's timeout is 12 hours. The DAG refuses a schedule that could not finish in that time.
+
+On Garage, put cold objects with a single PUT, as the seed script does. Garage reports a
+multipart object's composite CRC32 as a whole-object checksum, so boto3 rejects every GET of
+that object with `FlexibleChecksumError`.
+
+## Release log
+
+`{cold_prefix}restore_log/{run_id}.jsonl` in the cold bucket has one line per replay. The DAG
+rewrites the log after every release, so a run that stops part way still leaves a log.
+
+```json
+{"match_id": 9069761188, "end_time": 1793444439, "scheduled_offset_s": 4.588,
+ "scheduled_at": "2026-11-14T14:43:23.131+00:00", "released_at": "2026-11-14T14:43:23.452+00:00",
+ "bytes_in": 30092593, "bytes_out": 52419333, "status": "released", "speed": 10.0, "spacing": "event"}
+```
+
+`status` is one of `released`, `skipped` or `failed`. A failed line also has an `error`. Each
+line pairs event time (`end_time`) with processing time (`released_at`), for charts of the two.
