@@ -9,8 +9,6 @@ import requests
 from dota.errors import PermanentError, is_transient_status, redact
 
 API = "https://api.steampowered.com/IDOTA2Match_570"
-ALL_PICK = 22  # game_mode; Turbo is 23
-RANKED = 7  # lobby_type
 STEAM_ATTEMPTS = 5
 
 
@@ -47,54 +45,6 @@ def call(method: str, *, sleep: Callable[[float], None] = time.sleep, **params) 
 def newest_seq() -> int:
     """match_seq_num of the newest match. Seq nums are assigned in the order matches END."""
     return call("GetMatchHistory", matches_requested=1)["matches"][0]["match_seq_num"]
-
-
-def ranked_all_pick_spread(start: int, end: int, n: int, save_page: Callable[[int, dict], None] | None = None,
-                           *, sleep: Callable[[float], None] = time.sleep, pace_s: float = 2.0) -> list[int]:
-    """Up to n ranked All Pick match ids with start <= match_seq_num < end: the first new one on each
-    of n pages read at evenly spaced seq nums, so the sample covers the whole window instead of its
-    first minutes. A page without one adds nothing. If save_page is given it is called with
-    (start_seq, raw result dict) for every page fetched."""
-    ids: list[int] = []
-    for i in range(n):
-        if i:
-            sleep(pace_s)
-        seq = start + (end - start) * i // n
-        page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
-        if save_page:
-            save_page(seq, page)
-        ids += [m["match_id"] for m in page["matches"] if m["match_seq_num"] < end and m["match_id"] not in ids
-                and m["game_mode"] == ALL_PICK and m["lobby_type"] == RANKED][:1]
-    return ids
-
-
-def ranked_all_pick_between(seq: int, end: int, n: int, save_page: Callable[[int, dict], None] | None = None,
-                            *, sleep: Callable[[float], None] = time.sleep,
-                            pace_s: float = 2.0) -> tuple[list[int], int]:
-    """Up to n ranked All Pick match ids with seq <= match_seq_num < end, reading forward page by
-    page. Returns (ids, next_seq): where the next call should continue, so repeated calls cover the
-    whole window without skipping or repeating a match. next_seq >= end means the window is done.
-    save_page is called as in ranked_all_pick_spread."""
-    ids: list[int] = []
-    first = True
-    while seq < end and len(ids) < n:
-        if not first:
-            sleep(pace_s)
-        first = False
-        page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
-        if save_page:
-            save_page(seq, page)
-        if not page["matches"]:
-            break
-        for m in page["matches"]:
-            if m["match_seq_num"] >= end:
-                return ids, end
-            seq = m["match_seq_num"] + 1
-            if m["game_mode"] == ALL_PICK and m["lobby_type"] == RANKED:
-                ids.append(m["match_id"])
-                if len(ids) == n:
-                    break
-    return ids, seq
 
 
 def fetch_pages(start_seq: int, pages: int, save_page: Callable[[int, dict], None], *,

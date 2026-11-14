@@ -41,40 +41,6 @@ class FakeConn:
         return [(sql.split()[0], params) for sql, params in self.executed if not sql.startswith("SELECT")]
 
 
-def test_record_bookmark_saves_a_new_day():
-    conn = FakeConn(None)
-    assert ingest.record_bookmark(conn, DAY, 100, NOW) == 100
-    assert conn.writes() == [("INSERT", (DAY, 100, NOW))]
-
-
-def test_record_bookmark_keeps_the_first_value_on_a_rerun():
-    conn = FakeConn((100,))
-    assert ingest.record_bookmark(conn, DAY, 999, NOW) == 100
-    assert conn.writes() == []
-
-
-def test_seed_bookmark_saves_only_into_an_empty_table():
-    conn = FakeConn(None, None)  # table empty, then no bookmark for the day
-    assert ingest.seed_bookmark(conn, DAY, 100, NOW) is True
-    assert conn.writes() == [("INSERT", (DAY, 100, NOW))]
-
-
-def test_seed_bookmark_does_nothing_once_any_bookmark_exists():
-    conn = FakeConn((1,))
-    assert ingest.seed_bookmark(conn, DAY, 100, NOW) is False
-    assert conn.writes() == []
-
-
-def test_window_runs_from_the_previous_bookmark_to_the_days_own():
-    conn = FakeConn([(DAY, 300), (DAY - timedelta(days=2), 100)])  # a missed day widens the window
-    assert ingest.window(conn, DAY) == (100, 300)
-
-
-def test_window_is_none_until_both_bookmarks_exist():
-    assert ingest.window(FakeConn([(DAY, 300)]), DAY) is None
-    assert ingest.window(FakeConn([(DAY - timedelta(days=1), 200), (DAY - timedelta(days=2), 100)]), DAY) is None
-
-
 def test_enqueue_adds_a_match_due_in_an_hour():
     conn = FakeConn(None)
     ingest.enqueue(conn, 7, DAY, "no replay_url", NOW)
@@ -109,9 +75,9 @@ def test_mark_done_sets_done_at():
     assert conn.writes() == [("UPDATE", (NOW, 7))]
 
 
-def test_day_of_uses_the_sgt_date_or_the_override():
-    late_utc = datetime(2026, 11, 14, 16, 5, tzinfo=ingest.timezone.utc)  # 00:05 SGT on the 15th
-    assert ingest.day_of(late_utc) == date(2026, 11, 15)
+def test_day_of_is_the_sgt_day_before_or_the_override():
+    late_utc = datetime(2026, 11, 14, 17, 0, tzinfo=ingest.timezone.utc)  # 01:00 SGT on the 15th
+    assert ingest.day_of(late_utc) == date(2026, 11, 14)
     assert ingest.day_of(late_utc, "2026-11-10") == date(2026, 11, 10)
 
 
@@ -147,35 +113,15 @@ def test_try_download_lets_a_permanent_error_fail_the_task():
         download(url_error=PermanentError("HTTP 400"))
 
 
-BOOKMARKS = [(DAY, 1100), (DAY - timedelta(days=1), 100)]  # the window is seq 100..1100
+def test_sample_spreads_n_evenly_through_the_days_matches():
+    conn = FakeConn([(i,) for i in range(10)])
+    assert ingest.sample(conn, DAY, 3) == [0, 3, 6]
+    sql, params = conn.executed[0]
+    start = int(datetime(2026, 11, 13, 16, 0, tzinfo=ingest.timezone.utc).timestamp())  # 00:00 SGT on the 14th
+    assert params == (ingest.ALL_PICK, ingest.RANKED, start, start + 86400)
+    assert "start_time + duration" in sql and "ORDER BY match_seq_num" in sql
 
 
-def test_select_sample_spreads_n_across_the_window_and_saves_no_cursor():
-    conn = FakeConn(BOOKMARKS)
-    calls = []
-    ids, note = ingest.select(conn, DAY, 3, "sample", spread=lambda *a: calls.append(a) or [1, 2, 3],
-                              between=None)
-    assert (ids, calls, conn.writes()) == ([1, 2, 3], [(100, 1100, 3)], [])
-
-
-def test_select_window_starts_at_the_window_start_and_saves_the_cursor():
-    conn = FakeConn(BOOKMARKS, (None,))
-    calls = []
-    ids, note = ingest.select(conn, DAY, 2, "window", spread=None,
-                              between=lambda *a: calls.append(a) or ([7, 8], 350))
-    assert (ids, calls) == ([7, 8], [(100, 1100, 2)])
-    assert conn.writes() == [("UPDATE", (350, DAY))]
-    assert "25.00% of the window read" in note
-
-
-def test_select_window_continues_from_the_saved_cursor():
-    calls = []
-    ingest.select(FakeConn(BOOKMARKS, (350,)), DAY, 2, "window", spread=None,
-                  between=lambda *a: calls.append(a) or ([9], 1100))
-    assert calls == [(350, 1100, 2)]
-
-
-def test_select_is_none_without_a_window_and_rejects_an_unknown_mode():
-    assert ingest.select(FakeConn([(DAY, 1100)]), DAY, 2, "sample", spread=None, between=None) is None
-    with pytest.raises(ValueError, match="download_mode"):
-        ingest.select(FakeConn(), DAY, 2, "everything", spread=None, between=None)
+def test_sample_returns_all_when_the_day_has_n_or_fewer():
+    assert ingest.sample(FakeConn([(1,), (2,)]), DAY, 5) == [1, 2]
+    assert ingest.sample(FakeConn([]), DAY, 5) == []

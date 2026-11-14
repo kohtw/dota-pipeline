@@ -1,80 +1,62 @@
 """
-Download one day's ranked All Pick replays into Garage (s3://raw/replays/{match_id}.dem).
+Download a sample of yesterday's ranked All Pick replays into Garage (s3://raw/replays/{match_id}.dem).
 
-Started by record_bookmark (the BOOKMARKED asset) at 00:00 SGT. A day's window runs from the previous
-bookmark to the day's own in the warehouse (ingest.bookmarks), so it holds the matches that ended in
-the last ~24h, and a rerun of a day gets the same window. Each run takes N_MATCHES matches from it,
-chosen by the Airflow Variable download_mode:
-  sample (default)  spread evenly across the window; a rerun picks the same matches
-  window            the next ones after the day's saved cursor; each rerun continues, so enough
-                    runs (or a bigger matches_per_run) download the whole window
+Daily at 01:00 SGT, once the last hourly steam_fetch of the day has been loaded. Picks N_MATCHES
+ranked All Pick matches that ended yesterday (SGT) from stg.steam_matches, the matches steam_fetch
+pooled, spread evenly through the day; a rerun of a day picks the same matches. It reads no Steam
+API itself, so steam_fetch must be unpaused, or there is nothing to pick.
+
 The matches are downloaded in batches of BATCH, one mapped task per batch, so a big matches_per_run
 stays a handful of tasks; the task log lists what happened to each match. A replay that cannot be
 downloaded yet (OpenDota has no replay_url, a rate limit) is queued in ingest.download_queue for
 download_pending instead of failing the run.
 
-To redo or continue a past day, trigger with config {"day": "YYYY-MM-DD"}. Without one it works on today.
+To redo a past day, trigger with config {"day": "YYYY-MM-DD"}. Without one it works on yesterday.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from airflow.sdk import Param, Variable, dag, get_current_context, task
 from airflow.sdk.exceptions import AirflowSkipException
 
 from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
-from dota.assets import BOOKMARKED, STEAM_RAW
-from dota.config import API_RETRY, WAREHOUSE_INIT_DIR
+from dota.config import WAREHOUSE_INIT_DIR
 
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
 N_MATCHES = 50  # default replays per run
 MATCHES_VAR = "matches_per_run"  # Airflow Variable: overrides N_MATCHES (e.g. a small test run, or a bigger quota)
-MODE_VAR = "download_mode"  # Airflow Variable: sample (default) or window, see above
 BATCH = 25  # matches per download task
 BATCH_LABEL = "{{ batch_label }}"  # set by the task itself, so the UI lists mapped tasks by their match ids
 
 
-def _day() -> str:
-    from dota import ingest
-
-    context = get_current_context()
-    return ingest.day_of(context["dag_run"].run_after, context["params"].get("day")).isoformat()
-
-
 @dag(
-    schedule=BOOKMARKED,
+    schedule="0 17 * * *",  # 01:00 SGT
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
     catchup=False,
     max_active_runs=1,
     params={"day": Param(None, type=["null", "string"], format="date",
-                         description="Day to download (YYYY-MM-DD); empty for today")},
+                         description="Day to download (YYYY-MM-DD); empty for yesterday")},
     default_args=ALERT_CALLBACKS,
 )
 def dota_daily_download():
-    # an hour fits 50 paced pages even if every call times out twice before it succeeds
-    @task(pool="steam_api", execution_timeout=timedelta(hours=1), outlets=[STEAM_RAW], **API_RETRY)
+    @task
     def get_matches() -> list[dict]:
-        from dota import ingest, steam, steam_summary, storage, warehouse
+        from dota import ingest, warehouse
 
-        day = _day()
+        context = get_current_context()
+        day = ingest.day_of(context["dag_run"].run_after, context["params"].get("day"))
         n = int(Variable.get(MATCHES_VAR, default=N_MATCHES))
-        mode = Variable.get(MODE_VAR, default="sample").strip().lower()
-
-        def save(seq: int, page: dict) -> None:
-            steam_summary.save_page(seq, page, storage.put)
-
         conn = warehouse.connect()
         try:
-            warehouse.apply_init_sql(WAREHOUSE_INIT_DIR, conn)  # adds cursor_seq on an older volume
-            picked = ingest.select(conn, datetime.fromisoformat(day).date(), n, mode,
-                                   spread=lambda *a: steam.ranked_all_pick_spread(*a, save),
-                                   between=lambda *a: steam.ranked_all_pick_between(*a, save))
+            warehouse.apply_init_sql(WAREHOUSE_INIT_DIR, conn)  # creates ingest.download_queue on an older volume
+            ids = ingest.sample(conn, day, n)
         finally:
             conn.close()
-        if picked is None:
-            raise AirflowSkipException(f"no window for {day}: it needs that day's bookmark and an earlier one")
-        ids, note = picked
-        print(f"download_mode={mode}: {note}")
-        return [{"match_ids": ids[i:i + BATCH], "day": day} for i in range(0, len(ids), BATCH)]
+        if not ids:
+            raise AirflowSkipException(f"no ranked All Pick matches for {day} in stg.steam_matches; "
+                                       "is steam_fetch unpaused?")
+        print(f"{day}: picked {len(ids)} of {n}")
+        return [{"match_ids": ids[i:i + BATCH], "day": day.isoformat()} for i in range(0, len(ids), BATCH)]
 
     # no task retries: a replay that is not ready goes to the queue, which download_pending retries
     @task(pool="opendota_api", retries=0, map_index_template=BATCH_LABEL)
