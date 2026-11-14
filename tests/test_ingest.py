@@ -145,3 +145,37 @@ def test_try_download_lets_a_permanent_error_fail_the_task():
 
     with pytest.raises(PermanentError):
         download(url_error=PermanentError("HTTP 400"))
+
+
+BOOKMARKS = [(DAY, 1100), (DAY - timedelta(days=1), 100)]  # the window is seq 100..1100
+
+
+def test_select_sample_spreads_n_across_the_window_and_saves_no_cursor():
+    conn = FakeConn(BOOKMARKS)
+    calls = []
+    ids, note = ingest.select(conn, DAY, 3, "sample", spread=lambda *a: calls.append(a) or [1, 2, 3],
+                              between=None)
+    assert (ids, calls, conn.writes()) == ([1, 2, 3], [(100, 1100, 3)], [])
+
+
+def test_select_window_starts_at_the_window_start_and_saves_the_cursor():
+    conn = FakeConn(BOOKMARKS, (None,))
+    calls = []
+    ids, note = ingest.select(conn, DAY, 2, "window", spread=None,
+                              between=lambda *a: calls.append(a) or ([7, 8], 350))
+    assert (ids, calls) == ([7, 8], [(100, 1100, 2)])
+    assert conn.writes() == [("UPDATE", (350, DAY))]
+    assert "25.00% of the window read" in note
+
+
+def test_select_window_continues_from_the_saved_cursor():
+    calls = []
+    ingest.select(FakeConn(BOOKMARKS, (350,)), DAY, 2, "window", spread=None,
+                  between=lambda *a: calls.append(a) or ([9], 1100))
+    assert calls == [(350, 1100, 2)]
+
+
+def test_select_is_none_without_a_window_and_rejects_an_unknown_mode():
+    assert ingest.select(FakeConn([(DAY, 1100)]), DAY, 2, "sample", spread=None, between=None) is None
+    with pytest.raises(ValueError, match="download_mode"):
+        ingest.select(FakeConn(), DAY, 2, "everything", spread=None, between=None)

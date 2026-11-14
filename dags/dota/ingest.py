@@ -60,6 +60,32 @@ def window(conn, day: date) -> tuple[int, int] | None:
     return rows[1][1], rows[0][1]
 
 
+MODES = ("sample", "window")
+
+
+def select(conn, day: date, n: int, mode: str, *, spread: Callable[..., list[int]],
+           between: Callable[..., tuple[list[int], int]]) -> tuple[list[int], str] | None:
+    """The day's matches to download and a line for the log, or None when the day has no window.
+    sample: n matches spread evenly across the window (steam.ranked_all_pick_spread), the same n on
+    every rerun. window: the next n from the day's cursor (steam.ranked_all_pick_between), which is
+    then saved, so each rerun continues and enough runs download the whole window."""
+    if mode not in MODES:
+        raise ValueError(f"unknown download_mode {mode!r}, expected one of {MODES}")
+    span = window(conn, day)
+    if span is None:
+        return None
+    start, end = span
+    if mode == "sample":
+        ids = spread(start, end, n)
+        return ids, f"{day}: sampled {len(ids)} of {n} across seq {start}..{end}"
+    row = _execute(conn, "SELECT cursor_seq FROM ingest.bookmarks WHERE day = %s", (day,), "one")
+    cursor = row[0] if row and row[0] is not None else start
+    ids, next_seq = between(cursor, end, n)
+    _execute(conn, "UPDATE ingest.bookmarks SET cursor_seq = %s WHERE day = %s", (next_seq, day))
+    done = min(next_seq, end) - start
+    return ids, f"{day}: took {len(ids)} from seq {cursor}; {done / (end - start):.2%} of the window read"
+
+
 def enqueue(conn, match_id: int, day: date, error: str, now: datetime | None = None) -> None:
     """Queues a match whose download failed, for download_pending to retry. A match that is
     already queued is left as it is."""
