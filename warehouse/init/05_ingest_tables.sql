@@ -2,8 +2,9 @@
 -- and DuckDB, and is safe to rerun. Timestamps are UTC.
 CREATE SCHEMA IF NOT EXISTS ingest;
 
--- Matches whose replay could not be downloaded yet (OpenDota has no replay_url, or rate-limited).
--- download_pending retries a row once next_try_at has passed; done_at or gave_up_at ends it.
+-- Matches to download: dota_daily_download adds the day's picks, download_pending downloads a row
+-- once next_try_at has passed and retries it hourly while the replay is not ready (OpenDota has no
+-- replay_url yet, or rate-limited); done_at or gave_up_at ends it. attempts counts the tries made.
 CREATE TABLE IF NOT EXISTS ingest.download_queue (
     match_id    BIGINT    PRIMARY KEY,
     day         DATE      NOT NULL,

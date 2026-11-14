@@ -1,6 +1,6 @@
 """Replay download state in the warehouse: which matches a day's download picks (from the Steam
-matches steam_fetch pooled in stg.steam_matches), and the queue of matches whose replay could not
-be downloaded yet (ingest.download_queue, warehouse/init/05_ingest_tables.sql). Callers pass a live
+matches steam_fetch pooled in stg.steam_matches), and the queue of matches to download
+(ingest.download_queue, warehouse/init/05_ingest_tables.sql). Callers pass a live
 DB connection (dota.warehouse.connect); every function commits its own change."""
 
 from collections.abc import Callable
@@ -46,19 +46,19 @@ def sample(conn, day: date, n: int) -> list[int]:
     return [ids[i * len(ids) // n] for i in range(n)]
 
 
-def enqueue(conn, match_id: int, day: date, error: str, now: datetime | None = None) -> None:
-    """Queues a match whose download failed, for download_pending to retry. A match that is
-    already queued is left as it is."""
+def enqueue(conn, match_id: int, day: date, now: datetime | None = None) -> bool:
+    """Queues a match for download_pending to download, due at once. A match that is already
+    queued is left as it is. Returns True when it was added."""
     if _execute(conn, "SELECT 1 FROM ingest.download_queue WHERE match_id = %s", (match_id,), "one"):
-        return
+        return False
     now = now or utcnow()
-    _execute(conn, "INSERT INTO ingest.download_queue (match_id, day, attempts, last_error, added_at, "
-                   "next_try_at) VALUES (%s, %s, %s, %s, %s, %s)",
-             (match_id, day, 1, error, now, now + RETRY_EVERY))
+    _execute(conn, "INSERT INTO ingest.download_queue (match_id, day, attempts, added_at, next_try_at) "
+                   "VALUES (%s, %s, %s, %s, %s)", (match_id, day, 0, now, now))
+    return True
 
 
 def due(conn, now: datetime | None = None, limit: int = 50) -> list[int]:
-    """Queued match ids whose next try is due, oldest first."""
+    """Queued match ids whose next try is due, longest waiting first."""
     rows = _execute(conn, "SELECT match_id FROM ingest.download_queue WHERE done_at IS NULL "
                           "AND gave_up_at IS NULL AND next_try_at <= %s ORDER BY next_try_at LIMIT %s",
                     (now or utcnow(), limit), "all")
@@ -66,17 +66,17 @@ def due(conn, now: datetime | None = None, limit: int = 50) -> list[int]:
 
 
 def mark_done(conn, match_id: int, now: datetime | None = None) -> None:
-    _execute(conn, "UPDATE ingest.download_queue SET done_at = %s WHERE match_id = %s",
+    _execute(conn, "UPDATE ingest.download_queue SET done_at = %s, attempts = attempts + 1 WHERE match_id = %s",
              (now or utcnow(), match_id))
 
 
-def mark_failed(conn, match_id: int, error: str, now: datetime | None = None) -> bool:
-    """Records another failed try and schedules the next one, or gives up once the match has been
-    queued for GIVE_UP_AFTER. Returns True when it gave up."""
+def mark_failed(conn, match_id: int, error: str, now: datetime | None = None, permanent: bool = False) -> bool:
+    """Records a failed try and schedules the next one an hour later, or gives up: on a permanent
+    error, or once the match has been queued for GIVE_UP_AFTER. Returns True when it gave up."""
     now = now or utcnow()
     added_at, attempts = _execute(conn, "SELECT added_at, attempts FROM ingest.download_queue "
                                         "WHERE match_id = %s", (match_id,), "one")
-    gave_up = now - added_at >= GIVE_UP_AFTER
+    gave_up = permanent or now - added_at >= GIVE_UP_AFTER
     _execute(conn, "UPDATE ingest.download_queue SET attempts = %s, last_error = %s, next_try_at = %s, "
                    "gave_up_at = %s WHERE match_id = %s",
              (attempts + 1, error, now + RETRY_EVERY, now if gave_up else None, match_id))

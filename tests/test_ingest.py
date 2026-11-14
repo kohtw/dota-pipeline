@@ -41,15 +41,15 @@ class FakeConn:
         return [(sql.split()[0], params) for sql, params in self.executed if not sql.startswith("SELECT")]
 
 
-def test_enqueue_adds_a_match_due_in_an_hour():
+def test_enqueue_adds_a_match_due_at_once():
     conn = FakeConn(None)
-    ingest.enqueue(conn, 7, DAY, "no replay_url", NOW)
-    assert conn.writes() == [("INSERT", (7, DAY, 1, "no replay_url", NOW, NOW + ingest.RETRY_EVERY))]
+    assert ingest.enqueue(conn, 7, DAY, NOW) is True
+    assert conn.writes() == [("INSERT", (7, DAY, 0, NOW, NOW))]
 
 
 def test_enqueue_leaves_an_already_queued_match_alone():
     conn = FakeConn((1,))
-    ingest.enqueue(conn, 7, DAY, "no replay_url", NOW)
+    assert ingest.enqueue(conn, 7, DAY, NOW) is False
     assert conn.writes() == []
 
 
@@ -69,10 +69,17 @@ def test_mark_failed_gives_up_after_five_days():
     assert conn.writes()[0][1][3] == NOW  # gave_up_at
 
 
-def test_mark_done_sets_done_at():
+def test_mark_failed_gives_up_at_once_on_a_permanent_error():
+    conn = FakeConn((NOW, 0))
+    assert ingest.mark_failed(conn, 7, "not a Dota 2 replay", NOW, permanent=True) is True
+    assert conn.writes()[0][1][3] == NOW  # gave_up_at
+
+
+def test_mark_done_sets_done_at_and_counts_the_try():
     conn = FakeConn()
     ingest.mark_done(conn, 7, NOW)
     assert conn.writes() == [("UPDATE", (NOW, 7))]
+    assert "attempts = attempts + 1" in conn.executed[0][0]
 
 
 def test_day_of_is_the_sgt_day_before_or_the_override():
