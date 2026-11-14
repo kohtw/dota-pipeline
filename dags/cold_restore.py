@@ -50,8 +50,6 @@ def cold_restore():
     # log. Per-replay failures are already recorded and leave the rest of the run going.
     @task(execution_timeout=timedelta(seconds=MAX_RUN_S), retries=0, outlets=[REPLAYS_RESTORED])
     def release() -> dict[str, int]:
-        from airflow.sdk.exceptions import AirflowTaskTimeout
-
         from dota import cold, storage
 
         context = get_current_context()
@@ -62,7 +60,7 @@ def cold_restore():
             rate_per_min=float(p["rate_per_min"]), spacing=p["spacing"],
             start_after_match_id=int(start_after) if start_after is not None else None,
             cold_bucket=p["cold_bucket"], cold_prefix=p["cold_prefix"], hot_bucket=BUCKET,
-            run_id=context["run_id"], fatal=(AirflowTaskTimeout,))
+            run_id=context["run_id"])
         print(f"restore finished: {cold.status_counts(rows)}")
         return cold.raise_if_failed(rows)
 

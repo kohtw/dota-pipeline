@@ -104,7 +104,6 @@ def test_seed_uploads_checked_replays_unchanged_and_merges_the_manifest(tmp_path
     remote = FakeRemote({"replays/1.dem.zst": good, "replays/2.dem.zst": bad})
     monkeypatch.setattr(seed, "rclone_fetch", remote.fetch)
     s3 = FakeS3()
-    s3.upload_file = lambda path, bucket, key: s3.objects.update({(bucket, key): Path(path).read_bytes()})
     old = cold.manifest_entry(9, 9, 0, 10, 1, "old")
     s3.objects[(COLD, "cold/manifest.jsonl")] = cold.dump_manifest([old]).encode()
 

@@ -186,7 +186,10 @@ def seed(chosen: list[dict], client, bucket: str, prefix: str, remote: str, stag
             try:
                 with open(path, "rb") as f:
                     sha256, n_in, n_out = cold.check_replay(f)
-                client.upload_file(str(path), bucket, cold.cold_key(prefix, c["match_id"]))
+                # one PUT, not a multipart upload: Garage reports a multipart object's composite
+                # CRC32 as a whole-object one, so boto3 then rejects every GET of it
+                with open(path, "rb") as f:
+                    client.put_object(Bucket=bucket, Key=cold.cold_key(prefix, c["match_id"]), Body=f)
             except Exception as e:  # noqa: BLE001
                 log.error("match %s not seeded: %s: %s", c["match_id"], type(e).__name__, e)
                 failed += 1

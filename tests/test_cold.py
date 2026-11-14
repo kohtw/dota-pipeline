@@ -138,7 +138,7 @@ class FakeS3:
         return {}
 
     def put_object(self, Bucket, Key, Body=b""):
-        self.objects[(Bucket, Key)] = Body
+        self.objects[(Bucket, Key)] = Body.read() if hasattr(Body, "read") else Body
         self.puts.append(Key)
 
     def upload_fileobj(self, f, bucket, key):
@@ -289,7 +289,7 @@ def test_a_release_slower_than_its_gap_does_not_sleep():
 def test_log_is_written_after_every_release_and_when_the_run_stops():
     clock, writes = Clock(), []
 
-    class Timeout(Exception):
+    class Timeout(BaseException):  # like Airflow's task timeout
         pass
 
     def release(entry):
@@ -301,7 +301,7 @@ def test_log_is_written_after_every_release_and_when_the_run_stops():
     with pytest.raises(Timeout):
         cold.release_schedule(plan, release=release, is_hot=lambda m: False,
                               write_log=lambda rows: writes.append([r["match_id"] for r in rows]),
-                              speed=1, spacing="uniform", now=clock.now, sleep=clock.sleep, fatal=(Timeout,))
+                              speed=1, spacing="uniform", now=clock.now, sleep=clock.sleep)
     assert writes == [[1], [1]]
 
 

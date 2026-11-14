@@ -250,11 +250,12 @@ def dump_log(rows: Iterable[dict]) -> str:
 def release_schedule(plan: list[tuple[dict, float]], *, release: Callable[[dict], tuple[int, int]],
                      is_hot: Callable[[int], bool], write_log: Callable[[list[dict]], None],
                      speed: float, spacing: str, now: Callable[[], float] = time.time,
-                     sleep: Callable[[float], None] = time.sleep, fatal: tuple = ()) -> list[dict]:
+                     sleep: Callable[[float], None] = time.sleep) -> list[dict]:
     """Release each (entry, offset_s) at its offset from the start, one at a time. A replay already
     hot is skipped; a failed one is recorded and the rest still run. The log is rewritten after
     every release and once more on the way out, so a run that dies part way still leaves one.
-    Exceptions in `fatal` (the task timeout) stop the loop instead of counting as one failure."""
+    Airflow's task timeout is a BaseException, so it stops the loop rather than counting as one
+    failed replay."""
     rows: list[dict] = []
     start = now()
     finished = False
@@ -273,8 +274,6 @@ def release_schedule(plan: list[tuple[dict, float]], *, release: Callable[[dict]
                 else:
                     row["bytes_in"], row["bytes_out"] = release(entry)
                     row["status"] = "released"
-            except fatal:
-                raise
             except Exception as e:  # noqa: BLE001
                 row["status"] = "failed"
                 row["error"] = redact(f"{type(e).__name__}: {e}")[:MAX_ERROR_CHARS]
@@ -300,7 +299,7 @@ def release_schedule(plan: list[tuple[dict, float]], *, release: Callable[[dict]
 def restore(client, *, count: int, speed: float, rate_per_min: float, spacing: str,
             start_after_match_id: int | None, cold_bucket: str, cold_prefix: str, hot_bucket: str,
             run_id: str, now: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-            fatal: tuple = (), max_run_s: float = MAX_RUN_S) -> list[dict]:
+            max_run_s: float = MAX_RUN_S) -> list[dict]:
     """Release the next `count` manifest entries into the hot bucket on schedule; returns the log rows."""
     chosen = pick(read_manifest(client, cold_bucket, cold_prefix), count, start_after_match_id)
     if not chosen:
@@ -318,7 +317,7 @@ def restore(client, *, count: int, speed: float, rate_per_min: float, spacing: s
                                          hot_bucket, hot_key(e["match_id"]), e["sha256"]),
         is_hot=lambda match_id: exists(client, hot_bucket, hot_key(match_id)),
         write_log=lambda rows: client.put_object(Bucket=cold_bucket, Key=key, Body=dump_log(rows).encode()),
-        speed=speed, spacing=spacing, now=now, sleep=sleep, fatal=fatal)
+        speed=speed, spacing=spacing, now=now, sleep=sleep)
 
 
 def status_counts(rows: Iterable[dict]) -> dict[str, int]:
