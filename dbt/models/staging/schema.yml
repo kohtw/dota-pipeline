@@ -56,3 +56,29 @@ models:
       - name: is_usable
         description: "True only for recorded nonnegative net worth with snapshot age between zero and five seconds inclusive."
         data_tests: [not_null]
+
+  - name: stg_hero_deaths
+    description: "One scoreboard death (clean.deaths) with the victim's corpse position and respawn time. A dead hero stays at its corpse until it respawns and jumps to the fountain, so the corpse is the first position sample after the death tick and the respawn is the first later sample away from it, searched up to 240 seconds. Falls back to the last sample up to two seconds before the death when none follows it."
+    columns:
+      - name: match_id
+        description: "Composite key with tick and victim_slot, as in clean.deaths; checked by event_marts_keys_unique."
+        data_tests: [not_null]
+      - name: victim_slot
+        data_tests: [not_null]
+      - name: x
+        description: "World x of the corpse; NULL when the replay has no nearby sample."
+      - name: y
+        description: "World y of the corpse; NULL when the replay has no nearby sample."
+      - name: respawn_s
+        description: "Game time of the first sample away from the corpse (respawn or buyback); NULL when the replay ended first or has no corpse sample."
+      - name: dead_s
+        description: "respawn_s minus the death's game time; NULL with respawn_s."
+
+  - name: stg_hero_positions
+    description: "One clean.positions sample with is_alive. Dead from the death tick until respawn_s in stg_hero_deaths, or for 240 seconds when no respawn was found. A view: it is the size of clean.positions."
+    columns:
+      - name: match_id
+        description: "Composite key with player_slot and tick, as in clean.positions; unique because the model groups by it."
+        data_tests: [not_null]
+      - name: is_alive
+        data_tests: [not_null]
