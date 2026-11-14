@@ -1,18 +1,26 @@
-"""Clean one parsed replay. See docs/running-clean-job.md for usage and review handling.
+"""Spark clean job using per-tick scoreboard credit for deaths and assists.
 
-CLI: clean_replays.py <input_base> <output_base> <match_id> [--preview]
-No network APIs are used: inputs and outputs can be local directories or s3a://.
+Run from the repository root:
+  python spark_jobs/clean_replays.py data/parsed data/output/clean_kda MATCH_ID
+
+Requires raw kda_changes in addition to the existing parsed tables. See
+docs/running-kda-clean-job.md for its schema and the output contract additions.
+Spark reads, resolves and validates the tables and writes partitioned Parquet.
+The bounded attribution solver processes one match's small counter/event lists
+on the driver, as proposed in the credit plan; the replay itself stays in Spark.
 """
 
 import argparse
 import json
-import os
-import posixpath
 import sys
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
+import os
+import posixpath
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
+from itertools import product
 
 from pyspark.sql import DataFrame, SparkSession, Window, functions as F
 
@@ -25,8 +33,8 @@ SCHEMAS = {
     "player_stats": "match_id long, player_slot int, tick int, game_time_s double, level int, kills int, deaths int, assists int, net_worth int, unspent_gold int, total_earned_gold int, total_earned_xp int, last_hits int, denies int, hero_damage double, tower_damage double, healing double",
     "positions": "match_id long, player_slot int, tick int, game_time_s double, x double, y double",
     "damage_events": "match_id long, tick int, game_time_s double, attacker_name string, target_name string, inflictor_name string, attacker_slot int, target_slot int, damage int, hits int",
-    "deaths": "match_id long, tick int, game_time_s double, victim_slot int, killer_slot int, killer_name string",
-    "death_assists": "match_id long, tick int, victim_slot int, assist_slot int",
+    "deaths": "match_id long, tick int, game_time_s double, victim_slot int, killer_slot int, killer_name string, credited_killer_slot int, link_status string",
+    "death_assists": "match_id long, tick int, victim_slot int, assist_slot int, same_side boolean",
     "purchases": "match_id long, tick int, game_time_s double, player_slot int, item_name string, quantity int",
     "final_inventory": "match_id long, player_slot int, inventory_slot int, item_name string",
 }
@@ -101,7 +109,7 @@ def has_parts(spark, path):
                                  for s in fs.listStatus(jp))
 
 
-def read_match(spark, input_base, match_id):
+def _read_base_tables(spark, input_base, match_id):
     if not has_parts(spark, f"{input_base}/_complete/match_id={match_id}"):
         raise ValueError(f"Raw completion marker missing for match {match_id}")
     out = {}
@@ -150,8 +158,8 @@ class CleanResult:
             df.unpersist()
 
 
-def build_clean(raw):
-    """Build all nine candidate tables; validation decides whether they can be published."""
+def _build_replay_tables(raw):
+    """Build the seven non-credit tables; counter attribution adds deaths and assists."""
     result = CleanResult()
     names, headers = raw["names"], raw["players"]
     # Duplicate lookup keys multiply events before aggregation, so stop rather than double-count.
@@ -252,26 +260,6 @@ def build_clean(raw):
                                ["match_id", "buyer"], "left")
     result.tables["purchases"] = timed(purchases.groupBy(*KEYS["purchases"]).agg(F.count("*").alias("quantity")))
 
-    deaths = combat.filter((col("type") == "DOTA_COMBATLOG_DEATH") & (col("target_hero") == True)
-                           & no_illusions).dropDuplicates()
-    deaths = resolve(resolve(deaths, names, "attacker_name_idx", "killer_name"), names, "target_name_idx", "victim_name")
-    for name, slot in [("victim_name", "victim_slot"), ("killer_name", "killer_slot")]:
-        deaths = deaths.join(players.select("match_id", col("hero_name").alias(name), col("player_slot").alias(slot)),
-                             ["match_id", name], "left")
-    conflicts = duplicates(deaths, KEYS["deaths"])
-    result.note("conflicting_deaths", deaths.join(conflicts.select(*KEYS["deaths"]), KEYS["deaths"], "inner"))
-    deaths = deaths.join(conflicts.select(*KEYS["deaths"]), KEYS["deaths"], "left_anti")
-    result.tables["deaths"] = timed(deaths.select(*KEYS["deaths"], "killer_slot", "killer_name"))
-    tokens = deaths.select(*KEYS["deaths"], "killer_slot", F.explode(F.split(col("assist_players"), ";")).alias("token"))
-    tokens = tokens.withColumn("token", F.trim(col("token")))
-    result.note("invalid_assist_tokens", tokens.filter((col("token") != "") & ~col("token").rlike(r"^[0-9]+$")))
-    # Observed replay IDs are already 0-9, contrary to the draft contract's /2 assumption.
-    assists = tokens.filter(col("token").rlike(r"^[0-9]+$")).withColumn("assist_slot", F.expr("try_cast(token as int)"))
-    result.note("invalid_assist_slots", assists.filter(~F.coalesce(col("assist_slot").between(0, 9), F.lit(False))))
-    assists = (assists.filter(col("assist_slot").between(0, 9))
-               .filter(col("killer_slot").isNull() | (col("assist_slot") != col("killer_slot"))))
-    result.tables["death_assists"] = assists.select(*KEYS["death_assists"]).dropDuplicates()
-
     items = latest(real, ["match_id", "player_slot"], ties=["handle"]).select("match_id", "player_slot", "tick",
         F.explode(F.array(*[F.struct(F.lit(i).alias("inventory_slot"), col(f"m_hItems.{i:04d}").alias("item_handle"))
                             for i in range(17)])).alias("item")).select("match_id", "player_slot", "tick", "item.*")
@@ -295,14 +283,6 @@ def build_clean(raw):
     for name, df in result.tables.items():
         fields = [entry.strip().split() for entry in SCHEMAS[name].split(",")]
         result.tables[name] = df.select(*[col(c).cast(t).alias(c) for c, t in fields]).localCheckpoint(eager=True)
-    compare = latest(result.tables["player_stats"], ["match_id", "player_slot"]).select("match_id", "player_slot", "kills", "deaths", "assists")
-    for table, slot, label in [("deaths", "killer_slot", "event_kills"), ("deaths", "victim_slot", "event_deaths"),
-                               ("death_assists", "assist_slot", "event_assists")]:
-        counts = result.tables[table].groupBy("match_id", slot).count().select("match_id", col(slot).alias("player_slot"), col("count").alias(label))
-        compare = compare.join(counts, ["match_id", "player_slot"], "left").fillna({label: 0})
-    mismatch = reduce(lambda a, b: a | b, [col(s).isNull() | (col(s) != col(e))
-                        for s, e in [("kills", "event_kills"), ("deaths", "event_deaths"), ("assists", "event_assists")]])
-    result.note("scoreboard_disagreements", compare.filter(mismatch))
     return result
 
 
@@ -319,11 +299,20 @@ def validate(result, match_id):
             required.update(["team", "team_slot", "hero_name"])
         if name == "final_inventory":
             required.add("item_name")
+        if name == "deaths":
+            required.add("link_status")
+        if name == "death_assists":
+            required.add("same_side")
         invalid = reduce(lambda a, b: a | b, [col(c).isNull() for c in required]) | (col("match_id") != match_id)
         if df.filter(invalid).limit(1).count():
             errors.append(f"{name}: missing required fields or wrong match_id")
         if duplicates(df, KEYS[name]).limit(1).count():
             errors.append(f"{name}: duplicate output key")
+        if name == "deaths":
+            if df.filter(~col("link_status").isin("exact", "participant_assumed", "same_side_possible")
+                         | (col("credited_killer_slot").isNotNull()
+                            & ~col("credited_killer_slot").between(0, 9))).limit(1).count():
+                errors.append("deaths: invalid credit label or credited killer slot")
     if counts["matches"] != 1:
         errors.append("matches: expected exactly one row")
     if result.tables["matches"].filter(~col("winner_team").isin(2, 3) | col("winner_team").isNull()).limit(1).count():
@@ -380,6 +369,452 @@ def write_result(spark, result, report, output_base, preview=False):
     return complete
 
 
+class CreditError(ValueError):
+    """Inputs or attribution cannot establish consistent scoreboard credit."""
+
+
+@dataclass
+class CreditResult:
+    deaths: list[dict]
+    death_assists: list[dict]
+    review: list[dict]
+
+
+STATS = ("kills", "deaths", "assists")
+
+
+def _integer(value, label):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CreditError(f"{label} must be an integer")
+    return value
+
+
+def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
+               max_search_states=100_000):
+    """Return unique per-death credit, checked against independent final totals.
+
+    Inputs are normalized records for one match: players have player_slot/team;
+    counters have tick/player_slot/kills/deaths/assists; deaths have tick,
+    victim_slot, explicit illusion flags, optional last hitter/source owner and
+    a list of assist slots. final_scoreboard independently supplies final K/D/A.
+    Counters require the initial zero row and every subsequent per-tick change.
+
+    Search is bounded per connected timing window. Exhaustion blocks rather than
+    assuming that the first solution is unique. Counter deltas greater than one
+    are supported when several deaths occur at the same tick.
+    """
+    if _integer(window_ticks, "window_ticks") < 0:
+        raise CreditError("window_ticks must be nonnegative")
+    if _integer(max_search_states, "max_search_states") < 1:
+        raise CreditError("max_search_states must be positive")
+    teams = {}
+    for row in players:
+        slot = _integer(row["player_slot"], "player_slot")
+        team = _integer(row["team"], "team")
+        if slot not in range(10) or team != 2 + slot // 5 or slot in teams:
+            raise CreditError("Roster must have unique normalized slots and matching teams")
+        teams[slot] = team
+    if set(teams) != set(range(10)):
+        raise CreditError("Expected roster slots 0-9")
+
+    histories = defaultdict(list)
+    for row in counters:
+        slot = _integer(row["player_slot"], "counter player_slot")
+        if slot not in teams:
+            raise CreditError("Counter references unknown player")
+        histories[slot].append(row)
+    tokens = Counter()
+    last = {}
+    for slot in teams:
+        rows = sorted(histories[slot], key=lambda r: r["tick"])
+        if not rows:
+            raise CreditError(f"Missing counter history for slot {slot}")
+        previous = (0, 0, 0)
+        previous_tick = None
+        for index, row in enumerate(rows):
+            tick = _integer(row["tick"], "counter tick")
+            values = tuple(_integer(row[s], s) for s in STATS)
+            if previous_tick is not None and tick <= previous_tick:
+                raise CreditError(f"Duplicate counter tick for slot {slot}")
+            if index == 0 and values != (0, 0, 0):
+                raise CreditError(f"Counters must start at zero for slot {slot}")
+            for stat, old, new in zip(STATS, previous, values):
+                if new < old:
+                    raise CreditError(f"Counter goes down: slot {slot} {stat}")
+                if new > old:
+                    tokens[stat, slot, tick] += new - old
+            previous, previous_tick = values, tick
+        last[slot] = previous
+
+    final = {}
+    for row in final_scoreboard:
+        slot = _integer(row["player_slot"], "scoreboard player_slot")
+        if slot not in teams or slot in final:
+            raise CreditError("Scoreboard has unknown or duplicate player")
+        final[slot] = tuple(_integer(row[s], s) for s in STATS)
+    if final != last:
+        raise CreditError("Final scoreboard disagrees with counter history")
+
+    review = []
+    groups = defaultdict(list)
+    for raw in deaths:
+        row = dict(raw)
+        tick = _integer(row["tick"], "death tick")
+        victim = _integer(row["victim_slot"], "victim_slot")
+        if victim not in teams:
+            raise CreditError("Death references unknown victim")
+        if any(type(row.get(flag)) is not bool
+               for flag in ("attacker_illusion", "target_illusion")):
+            raise CreditError("Explicit illusion flags are required")
+        if row["target_illusion"]:
+            review.append({"tick": tick, "victim_slot": victim, "reason": "illusion_victim"})
+            continue
+        for key in ("killer_slot", "source_owner_slot"):
+            if row.get(key) is not None:
+                value = _integer(row[key], key)
+                if value not in teams:
+                    raise CreditError(f"Unknown {key}")
+        participants = row.get("assist_players", [])
+        if not isinstance(participants, (list, tuple, set)):
+            raise CreditError("assist_players must contain normalized integer slots")
+        participants = tuple(sorted(set(_integer(p, "assist slot") for p in participants)))
+        if any(p not in teams for p in participants):
+            raise CreditError("Unknown assist slot")
+        row["assist_players"] = participants
+        groups[tick, victim].append(row)
+
+    events = []
+    for (tick, victim), rows in sorted(groups.items()):
+        # Meepo may emit a self-source duplicate alongside the actual attacker.
+        nonself = [r for r in rows
+                   if (r.get("source_owner_slot") if r.get("source_owner_slot") is not None
+                       else r.get("killer_slot")) != victim]
+        preferred = nonself or rows
+        signatures = {(r.get("killer_slot"), r.get("killer_name"),
+                       r.get("source_owner_slot"), r["attacker_illusion"]) for r in preferred}
+        if len(signatures) != 1:
+            raise CreditError(f"Conflicting death sources at tick {tick}, victim {victim}")
+        row = dict(preferred[0])
+        row["assist_players"] = tuple(sorted({p for r in preferred for p in r["assist_players"]}))
+        if len(rows) > 1:
+            review.append({"tick": tick, "victim_slot": victim, "reason": "merged_death_records"})
+        if not any(stat == "deaths" and slot == victim and tick <= ct <= tick + window_ticks
+                   for stat, slot, ct in tokens):
+            review.append({"tick": tick, "victim_slot": victim, "reason": "no_death_counter_rise"})
+        else:
+            events.append(row)
+
+    # Independent timing components keep simultaneous fights local to the solver.
+    components = []
+    for event in events:
+        if not components or event["tick"] > components[-1][-1]["tick"] + window_ticks:
+            components.append([])
+        components[-1].append(event)
+    buckets = [Counter() for _ in components]
+    for token, count in tokens.items():
+        stat, slot, tick = token
+        possible = [i for i, component in enumerate(components)
+                    if any(e["tick"] <= tick <= e["tick"] + window_ticks
+                           and (stat != "deaths" or e["victim_slot"] == slot) for e in component)]
+        if len(possible) != 1:
+            raise CreditError(f"Counter increase has no matching death window: {token}")
+        buckets[possible[0]][token] = count
+
+    output, assists = [], []
+    for component, budget in zip(components, buckets):
+        primary = _solve(component, budget, teams, window_ticks, max_search_states)
+        if not primary:
+            # Actual same-team credit is allowed, but must still be uniquely determined.
+            primary = _solve(component, budget, teams, window_ticks, max_search_states,
+                             same_side=True)
+        if len(primary) != 1:
+            raise CreditError("No consistent credit answer" if not primary else "Ambiguous credit assignment")
+        chosen = primary[0]
+        for index, (event, (killer, credited_assists)) in enumerate(zip(component, chosen)):
+            status = "exact"
+            # Search for an alternative to THIS link, not just the first two
+            # alternatives elsewhere in a simultaneous fight.
+            if _solve(component, budget, teams, window_ticks, max_search_states,
+                      same_side=True, different_from=chosen, different_index=index):
+                status = "same_side_possible"
+            elif _solve(component, budget, teams, window_ticks, max_search_states,
+                        restrict_participants=False, same_side=True,
+                        different_from=chosen, different_index=index):
+                status = "participant_assumed"
+            row = {"tick": event["tick"], "victim_slot": event["victim_slot"],
+                   "killer_slot": event.get("killer_slot"), "killer_name": event.get("killer_name"),
+                   "credited_killer_slot": killer, "link_status": status}
+            output.append(row)
+            for slot in credited_assists:
+                assists.append({"tick": event["tick"], "victim_slot": event["victim_slot"],
+                                "assist_slot": slot, "same_side": teams[slot] == teams[event["victim_slot"]]})
+
+    totals = {slot: [0, 0, 0] for slot in teams}
+    for row in output:
+        totals[row["victim_slot"]][1] += 1
+        if row["credited_killer_slot"] is not None:
+            totals[row["credited_killer_slot"]][0] += 1
+    for row in assists:
+        totals[row["assist_slot"]][2] += 1
+    if {slot: tuple(value) for slot, value in totals.items()} != final:
+        raise CreditError("Final scoreboard disagrees with credited totals")
+    return CreditResult(output, assists, review)
+
+
+def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
+           same_side=False, different_from=None, different_index=None):
+    """Search counter-token allocations; distinguish links, not token permutations."""
+    remaining = budget.copy()
+    answers = set()
+    states = 0
+
+    def visit(index, links):
+        nonlocal states
+        states += 1
+        if states > limit:
+            raise CreditError("Credit search limit exceeded; attribution not established")
+        if len(answers) >= (1 if different_from is not None else 2):
+            return
+        if index == len(events):
+            answer = tuple(links)
+            differs = (different_from is None or
+                       answer[different_index] != different_from[different_index])
+            if not any(remaining.values()) and differs:
+                answers.add(answer)
+            return
+        event = events[index]
+        tick, victim = event["tick"], event["victim_slot"]
+        # A remaining token must be usable by some unprocessed event.
+        for (stat, slot, ct), count in remaining.items():
+            if count and not any(e["tick"] <= ct <= e["tick"] + window
+                                 and (stat != "deaths" or e["victim_slot"] == slot)
+                                 for e in events[index:]):
+                return
+        available = defaultdict(list)
+        for token, count in remaining.items():
+            stat, slot, ct = token
+            if count and tick <= ct <= tick + window:
+                available[stat, slot].append(token)
+        death_options = available["deaths", victim]
+        if not death_options:
+            return
+        owner = event.get("source_owner_slot")
+        if owner is None and not event["attacker_illusion"]:
+            owner = event.get("killer_slot")
+        enemy_owner = owner is not None and teams[owner] != teams[victim]
+        killers = [None]
+        for slot in teams:
+            if not available["kills", slot] or slot == victim:
+                continue
+            if not same_side and teams[slot] == teams[victim]:
+                continue
+            if enemy_owner and slot != owner:
+                continue
+            if (not enemy_owner and restrict_participants and event["assist_players"]
+                    and slot not in event["assist_players"]):
+                continue
+            killers.append(slot)
+        if enemy_owner:
+            killers = [k for k in killers if k == owner]
+        for killer in killers:
+            assist_slots = [s for s in teams if s != killer
+                            and available["assists", s]
+                            and (same_side or teams[s] != teams[victim])]
+            for mask in product((False, True), repeat=len(assist_slots)):
+                selected = tuple(s for s, keep in zip(assist_slots, mask) if keep)
+                options = [death_options]
+                if killer is not None:
+                    options.append(available["kills", killer])
+                options.extend(available["assists", s] for s in selected)
+                for used in product(*options):
+                    for token in used:
+                        remaining[token] -= 1
+                    visit(index + 1, [*links, (killer, selected)])
+                    for token in used:
+                        remaining[token] += 1
+                    if len(answers) >= (1 if different_from is not None else 2):
+                        return
+
+    visit(0, [])
+    return sorted(answers, key=repr)
+
+
+COUNTER_PROPS = {
+    "m_vecPlayerData.m_iPlayerTeam": "team",
+    "m_vecPlayerTeamData.m_iTeamSlot": "team_slot",
+    "m_vecPlayerTeamData.m_nSelectedHeroID": "hero_id",
+    "m_vecPlayerTeamData.m_iKills": "kills",
+    "m_vecPlayerTeamData.m_iDeaths": "deaths",
+    "m_vecPlayerTeamData.m_iAssists": "assists",
+}
+DEATH_SCHEMA = SCHEMAS["deaths"]
+ASSIST_SCHEMA = SCHEMAS["death_assists"]
+REVIEW_SCHEMA = "match_id long, tick int, victim_slot int, reason string"
+
+
+def require_columns(df, names, label):
+    missing = sorted(set(names) - set(df.columns))
+    if missing:
+        raise CreditError(f"{label}: missing columns {missing}")
+
+
+def reject_rows(df, condition, message):
+    if df.filter(condition).limit(1).count():
+        raise CreditError(message)
+
+
+def read_match(spark, input_base, match_id):
+    """Require the new input before starting the existing nine-table transform."""
+    path = f"{input_base}/kda_changes/match_id={match_id}"
+    if not has_parts(spark, path):
+        raise CreditError(
+            f"Missing per-tick kda_changes: {path}. Re-parse with per-tick, "
+            "changes-only K/D/A extraction; one-second snapshots cannot replace it.")
+    raw = _read_base_tables(spark, input_base, match_id)
+    try:
+        changes = spark.read.parquet(path)
+        if "match_id" in changes.columns:
+            reject_rows(changes, F.col("match_id").isNull() | (F.col("match_id") != match_id),
+                        "kda_changes: embedded match_id disagrees with partition")
+        raw["kda_changes"] = changes.withColumn("match_id", F.lit(match_id).cast("long")).cache()
+        return raw
+    except Exception:
+        for df in raw.values():
+            df.unpersist()
+        raise
+
+
+def normalize_counters(raw, players):
+    """Map resource array indices to stable clean slots using Spark joins.
+
+    Initial rows can precede team assignment. Recover their slot using the index's
+    later assignment, but reject index reuse or multiple indices for one player.
+    """
+    require_columns(raw, ["match_id", "tick", "index", *COUNTER_PROPS], "kda_changes")
+    counters = raw.select("match_id", "tick", "index",
+                          *[col(p).alias(c) for p, c in COUNTER_PROPS.items()])
+    assigned = counters.filter(F.col("team").isin(2, 3))
+    reject_rows(assigned, F.col("team_slot").isNull() | ~F.col("team_slot").between(0, 4),
+                "kda_changes: invalid team slot")
+    mapping = (assigned.select("match_id", "index", "team", "team_slot")
+               .distinct().withColumn("player_slot", (F.col("team") - 2) * 5 + F.col("team_slot")))
+    for keys in (["match_id", "index"], ["match_id", "player_slot"]):
+        if duplicates(mapping, keys).limit(1).count():
+            raise CreditError("kda_changes: player index maps to more than one slot or vice versa")
+    roster = players.select("match_id", "player_slot", F.col("team").alias("roster_team"))
+    reject_rows(mapping.join(roster, ["match_id", "player_slot"], "left"),
+                F.col("roster_team").isNull() | (F.col("team") != F.col("roster_team")),
+                "kda_changes: assignment disagrees with the player roster")
+    # Draft/selection rows can contain temporary or placeholder hero IDs. Check
+    # the final identity against the independently sampled final roster instead.
+    if "hero_id" in players.columns:
+        identities = players.select("match_id", "player_slot", F.col("hero_id").alias("roster_hero"))
+        observed = counters.join(mapping.select("match_id", "index", "player_slot"),
+                                 ["match_id", "index"], "inner").join(
+                                     identities, ["match_id", "player_slot"], "left")
+        observed = latest(observed, ["match_id", "player_slot"])
+        reject_rows(observed, F.col("roster_hero").isNotNull()
+                    & (F.col("hero_id").isNull() | (F.col("hero_id") != F.col("roster_hero"))),
+                    "kda_changes: hero identity disagrees with the player roster")
+    return (counters.join(mapping.select("match_id", "index", "player_slot"),
+                          ["match_id", "index"], "inner")
+            .select("match_id", "tick", "player_slot", "kills", "deaths", "assists"))
+
+
+def normalize_deaths(combat, names, players):
+    """Resolve direct attacker, damage source owner and victim without illusion filtering."""
+    require_columns(combat, ["match_id", "tick", "type", "target_hero", "attacker_illusion",
+                             "target_illusion", "attacker_name_idx", "target_name_idx",
+                             "damage_source_name_idx", "assist_players"], "combatlog")
+    deaths = combat.filter((F.col("type") == "DOTA_COMBATLOG_DEATH")
+                           & (F.col("target_hero") == True))
+    for index, name in [("attacker_name_idx", "killer_name"),
+                        ("target_name_idx", "victim_name"),
+                        ("damage_source_name_idx", "source_name")]:
+        deaths = resolve(deaths, names, index, name)
+    for name, slot in [("killer_name", "killer_slot"), ("victim_name", "victim_slot"),
+                       ("source_name", "source_owner_slot")]:
+        lookup = players.select("match_id", F.col("hero_name").alias(name), F.col("player_slot").alias(slot))
+        deaths = deaths.join(lookup, ["match_id", name], "left")
+    reject_rows(deaths, F.col("victim_slot").isNull(), "combatlog: unresolved hero victim")
+    # Raw assist IDs are already 0-9. Preserve invalid tokens so they fail,
+    # rather than disappearing in a cast or silently changing their meaning.
+    deaths = deaths.withColumn("_tokens", F.filter(
+        F.transform(F.split(F.coalesce(F.col("assist_players"), F.lit("")), ";"),
+                    lambda x: F.trim(x)), lambda x: x != ""))
+    reject_rows(deaths, F.exists(F.col("_tokens"), lambda x: ~x.rlike("^[0-9]$")),
+                "combatlog: invalid assist player IDs; expected normalized slots 0-9")
+    return deaths.select("tick", "victim_slot", "killer_slot", "killer_name", "source_owner_slot",
+                         "attacker_illusion", "target_illusion",
+                         F.transform(F.col("_tokens"), lambda x: x.cast("int")).alias("assist_players"))
+
+
+def build_clean(raw, match_id, *, window_ticks=4, max_search_states=100_000):
+    """Return all nine clean Spark DataFrames, with counter-based credit columns."""
+    if not isinstance(match_id, int) or isinstance(match_id, bool) or match_id <= 0:
+        raise CreditError("Expected a positive match_id")
+    if "kda_changes" not in raw:
+        raise CreditError("Missing per-tick kda_changes; re-parsing is required")
+    for name, df in raw.items():
+        require_columns(df, ["match_id"], name)
+        reject_rows(df, F.col("match_id").isNull() | (F.col("match_id") != match_id),
+                    f"{name}: missing or wrong match_id")
+    headers = raw["match"].select("match_id").collect()
+    if len(headers) != 1:
+        raise CreditError("Expected exactly one match header")
+
+    # Build the seven replay tables, then add counter-established death credit.
+    result = _build_replay_tables(raw)
+    try:
+        players = result.tables["players"]
+        counters = normalize_counters(raw["kda_changes"], players)
+        death_events = normalize_deaths(raw["combatlog"], raw["names"], players)
+        scoreboard = latest(result.tables["player_stats"], ["match_id", "player_slot"])
+        credited = credit_kda(
+            [r.asDict() for r in players.select("player_slot", "team").collect()],
+            [r.asDict() for r in counters.drop("match_id").collect()],
+            [r.asDict() for r in death_events.collect()],
+            [r.asDict() for r in scoreboard.select("player_slot", "kills", "deaths", "assists").collect()],
+            window_ticks=window_ticks, max_search_states=max_search_states)
+        start = raw["gamerules"].filter(col("m_pGameRules.m_nGameState") == 5).agg(
+            F.min("tick").alias("tick")).first().tick
+        if start is None:
+            raise CreditError("No game-start tick found")
+        spark = players.sparkSession
+        deaths = [{**row, "match_id": match_id, "game_time_s": (row["tick"] - start) / 30.0}
+                  for row in credited.deaths]
+        assists = [{**row, "match_id": match_id} for row in credited.death_assists]
+        result.tables["deaths"] = spark.createDataFrame(deaths, DEATH_SCHEMA).cache()
+        result.tables["death_assists"] = spark.createDataFrame(assists, ASSIST_SCHEMA).cache()
+        result.note("kda_credit_review", spark.createDataFrame(
+            [{**r, "match_id": match_id} for r in credited.review], REVIEW_SCHEMA), blocking=False)
+        result.note("kda_assumed_links", result.tables["deaths"].filter(F.col("link_status") != "exact"),
+                    blocking=False)
+        result.note("kda_same_side_assists", result.tables["death_assists"].filter("same_side"), blocking=False)
+        result.note("scoreboard_disagreements", scoreboard_disagreements(result.tables))
+        return result
+    except Exception:
+        result.release()
+        raise
+
+
+def scoreboard_disagreements(tables):
+    """Recheck Spark output using credited killer, not direct last hitter."""
+    comparison = latest(tables["player_stats"], ["match_id", "player_slot"]).select(
+        "match_id", "player_slot", "kills", "deaths", "assists")
+    for table, slot, label in [("deaths", "credited_killer_slot", "event_kills"),
+                               ("deaths", "victim_slot", "event_deaths"),
+                               ("death_assists", "assist_slot", "event_assists")]:
+        counts = (tables[table].filter(F.col(slot).isNotNull()).groupBy("match_id", slot).count()
+                  .select("match_id", F.col(slot).alias("player_slot"), F.col("count").alias(label)))
+        comparison = comparison.join(counts, ["match_id", "player_slot"], "left").fillna({label: 0})
+    return comparison.filter(
+        F.col("kills").isNull() | F.col("deaths").isNull() | F.col("assists").isNull()
+        | (F.col("kills") != F.col("event_kills"))
+        | (F.col("deaths") != F.col("event_deaths"))
+        | (F.col("assists") != F.col("event_assists")))
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "clean":
@@ -388,30 +823,35 @@ def main(argv=None):
     parser.add_argument("input_base")
     parser.add_argument("output_base")
     parser.add_argument("match_id", type=int)
-    parser.add_argument("--preview", action="store_true", help="Write seven tables and candidate/review data, without a completion marker")
+    parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--window-ticks", type=int, default=4)
+    parser.add_argument("--max-search-states", type=int, default=100_000)
     args = parser.parse_args(argv)
-    if args.match_id <= 0:
-        parser.error("match_id must be positive")
-    try:
-        input_base, output_base = normalize_path(args.input_base), normalize_path(args.output_base)
-    except ValueError as exc:
-        parser.error(str(exc))
-    # Prevent destructive output placement inside or above the raw tree.
-    if (input_base == output_base or input_base.startswith(output_base.rstrip("/") + "/")
-            or output_base.startswith(input_base.rstrip("/") + "/")):
+    if args.match_id <= 0 or args.window_ticks < 0 or args.max_search_states < 1:
+        parser.error("match_id/search limit must be positive and window ticks nonnegative")
+    input_base, output_base = normalize_path(args.input_base), normalize_path(args.output_base)
+    if (input_base == output_base or input_base.startswith(output_base + "/")
+            or output_base.startswith(input_base + "/")):
         parser.error("Input and output must be separate, non-overlapping directories")
     spark = spark_session(s3=input_base.startswith("s3a://") or output_base.startswith("s3a://"))
     spark.sparkContext.setLogLevel("WARN")
     raw, result = {}, None
     try:
-        # A failed rebuild must not leave an older marker advertising stale success.
         delete_path(spark, f"{output_base}/_complete/match_id={args.match_id}")
         raw = read_match(spark, input_base, args.match_id)
-        result = build_clean(raw)
-        report = validate(result, args.match_id)
+        result = build_clean(raw, args.match_id, window_ticks=args.window_ticks,
+                             max_search_states=args.max_search_states)
+        report = {**validate(result, args.match_id), "credit_method": "per_tick_counters",
+                  "contract_version": "kda-credit-v1", "window_ticks": args.window_ticks}
         complete = write_result(spark, result, report, output_base, args.preview)
         print(json.dumps({**report, "complete": complete, "preview": args.preview}, indent=2))
         return 0 if complete or args.preview else 2
+    except CreditError as exc:
+        report = {"match_id": args.match_id, "complete": False, "preview": args.preview,
+                  "credit_method": "per_tick_counters", "errors": [str(exc)]}
+        write_json(spark, f"{output_base}/_review/match_id={args.match_id}/report.json", report)
+        print(json.dumps(report, indent=2), file=sys.stderr)
+        return 2
     finally:
         if result:
             result.release()

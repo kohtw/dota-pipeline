@@ -71,8 +71,10 @@ CREATE TABLE IF NOT EXISTS clean.deaths (
     tick        INTEGER NOT NULL,
     game_time_s DOUBLE PRECISION NOT NULL,
     victim_slot INTEGER NOT NULL,
-    killer_slot INTEGER,                     -- NULL when a creep or tower got the kill
+    killer_slot INTEGER,                     -- direct last hitter; NULL for a non-player unit
     killer_name TEXT,
+    credited_killer_slot INTEGER,             -- scoreboard credit; may differ from last hitter
+    link_status TEXT NOT NULL,
     PRIMARY KEY (match_id, tick, victim_slot)
 );
 
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS clean.death_assists (
     tick        INTEGER NOT NULL,
     victim_slot INTEGER NOT NULL,
     assist_slot INTEGER NOT NULL,
+    same_side   BOOLEAN NOT NULL,
     PRIMARY KEY (match_id, tick, victim_slot, assist_slot)
 );
 
@@ -101,3 +104,13 @@ CREATE TABLE IF NOT EXISTS clean.final_inventory (
     item_name      TEXT    NOT NULL,
     PRIMARY KEY (match_id, player_slot, inventory_slot)
 );
+
+-- Upgrade warehouses created before counter-based credit. Safe to repeat on
+-- Postgres and DuckDB; one ADD per ALTER for DuckDB compatibility.
+-- Legacy rows deliberately remain NULL: direct last hitters cannot establish
+-- credited kills or link confidence. Re-clean and reload those matches.
+-- Fresh tables have NOT NULL labels declared above; incoming data on
+-- upgraded tables is checked by the clean contract/loader before insertion.
+ALTER TABLE clean.deaths ADD COLUMN IF NOT EXISTS credited_killer_slot INTEGER;
+ALTER TABLE clean.deaths ADD COLUMN IF NOT EXISTS link_status TEXT;
+ALTER TABLE clean.death_assists ADD COLUMN IF NOT EXISTS same_side BOOLEAN;

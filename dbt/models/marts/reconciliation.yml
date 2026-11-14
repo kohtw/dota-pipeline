@@ -15,14 +15,15 @@ models:
       - name: kills_steam
         description: "stg.steam_players.kills"
       - name: kills_events
-        description: "kill_participation.kills_from_events"
+        description: "kill_participation.kills_from_events, counted by credited_killer_slot rather than last hitter"
       - name: deaths_replay
       - name: deaths_steam
       - name: deaths_events
       - name: assists_replay
       - name: assists_steam
       - name: assists_events
+        description: "Full counter-credited assist ledger, including same-side assists; not the participation-only numerator."
       - name: scoreboard_matches_steam
         description: "Hero and all three of K/D/A equal between replay and Steam. False when either side is NULL."
       - name: events_match_scoreboard
-        description: "Replay K/D/A equal to the counts from death events. False when either side is NULL."
+        description: "Replay K/D/A equal to credited kill/death/full-assist counts. False when either side is NULL."

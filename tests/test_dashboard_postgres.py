@@ -48,7 +48,7 @@ def test_live_loaders_agree_with_warehouse_marts(dashboard_database):
         expected_damage = cursor.fetchall()
         cursor.execute(
             "SELECT s.player_slot,s.hero_name,s.team,s.won,s.final_items,k.kill_participation,"
-            "CAST(k.team_kills AS BIGINT),k.kills_from_events+k.assists_from_events "
+            "CAST(k.team_kills AS BIGINT),k.kill_involvements "
             "FROM marts.match_scoreboard s LEFT JOIN marts.kill_participation k "
             "ON k.match_id=s.match_id AND k.player_slot=s.player_slot "
             "WHERE s.match_id=%s ORDER BY s.player_slot", (match_id,),

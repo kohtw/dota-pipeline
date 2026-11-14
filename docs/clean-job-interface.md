@@ -10,7 +10,9 @@ Raw parsed Parquet, one folder per table per match, in the existing `raw` bucket
 
     s3a://raw/parsed/{table}/match_id={id}/
 
-Raw columns are in `docs/data-contract.md`.
+Raw columns are in `docs/data-contract.md`. The counter-based cleaner requires the
+per-tick, changes-only `kda_changes` table, including each player's initial zero counters.
+Old parsed outputs need this table added before cleaning.
 
 ## Outputs
 
@@ -33,7 +35,8 @@ Tables: `matches`, `players`, `player_stats`, `positions`, `damage_events`, `dea
 ## Invocation
 
 - Image: `dota-spark-clean`
-- CLI: `clean <input_base> <output_base> <match_id>`
+- Script: `spark_jobs/clean_replays.py` (counter-based credit is the main implementation).
+- CLI: `clean <input_base> <output_base> <match_id>`; the initial `clean` token is optional.
   - `input_base` = `s3a://raw/parsed`
   - `output_base` = `s3a://raw/clean`
 - One match per invocation; orchestration maps it over matches (same pattern as the parser's DockerOperator in `dags/parse_pending.py`).

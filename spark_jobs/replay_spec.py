@@ -37,9 +37,16 @@ def string_table(name, table):
     return {"name": name, "kind": "string_table", "string_table": table}
 
 
-def snapshot(name, classes, props, index_count=0):
-    """Every SAMPLE_TICKS: one row per matching entity (per array index if index_count, '{i}' in props)."""
-    return {"name": name, "kind": "snapshot", "classes": classes, "props": props, "index_count": index_count}
+def snapshot(name, classes, props, index_count=0, *, sample_ticks=None, changes_only=False):
+    """Sample properties per entity/index; optionally override rate and suppress unchanged rows."""
+    table = {"name": name, "kind": "snapshot", "classes": classes, "props": props, "index_count": index_count}
+    if sample_ticks is not None:
+        if isinstance(sample_ticks, bool) or not isinstance(sample_ticks, int) or sample_ticks < 1:
+            raise ValueError("sample_ticks must be a positive integer")
+        table["sample_ticks"] = sample_ticks
+    if changes_only:
+        table["changes_only"] = True
+    return table
 
 
 def lifecycle(name, classes, props):
@@ -76,6 +83,14 @@ TABLES = [
         ("m_vecPlayerTeamData.{i}.m_iDeaths", "int"),
         ("m_vecPlayerTeamData.{i}.m_iAssists", "int"),
     ], index_count=64),
+    snapshot("kda_changes", ["CDOTA_PlayerResource"], [
+        ("m_vecPlayerData.{i}.m_iPlayerTeam", "int"),
+        ("m_vecPlayerTeamData.{i}.m_iTeamSlot", "int"),
+        ("m_vecPlayerTeamData.{i}.m_nSelectedHeroID", "int"),
+        ("m_vecPlayerTeamData.{i}.m_iKills", "int"),
+        ("m_vecPlayerTeamData.{i}.m_iDeaths", "int"),
+        ("m_vecPlayerTeamData.{i}.m_iAssists", "int"),
+    ], index_count=64, sample_ticks=1, changes_only=True),
     snapshot("team_data", ["CDOTA_DataRadiant", "CDOTA_DataDire"], [
         ("m_vecDataTeam.{i}.m_iNetWorth", "int"),
         ("m_vecDataTeam.{i}.m_iReliableGold", "int"),

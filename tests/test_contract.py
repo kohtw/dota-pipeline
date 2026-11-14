@@ -52,6 +52,14 @@ def test_extra_columns_are_allowed():
     assert check(store(heroes=table("heroes", m_iHealth=[100])))["heroes"] == 1
 
 
+def test_per_tick_counters_are_required_for_newly_complete_parses():
+    with pytest.raises(contract.ContractError, match="kda_changes: no data"):
+        check(store(kda_changes=None))
+    t = table("kda_changes").drop_columns(["m_vecPlayerTeamData.m_iAssists"])
+    with pytest.raises(contract.ContractError, match="kda_changes: missing columns"):
+        check(store(kda_changes=t))
+
+
 def test_missing_column_fails():
     t = table("heroes").drop_columns(["CBodyComponent.m_vecX"])
     with pytest.raises(contract.ContractError, match=r"heroes: missing columns \['CBodyComponent.m_vecX'\]"):

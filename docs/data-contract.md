@@ -12,7 +12,7 @@ Tables and columns are defined in [`spark_jobs/replay_spec.py`](../spark_jobs/re
 - **Teams:** `2` = Radiant, `3` = Dire.
 - **Raw is unresolved:** the parser writes source values only. Columns are named after the replay property they hold. Names are indexes into a string table (`names`, `entity_names`), entities are referenced by handle, positions are grid cell + offset, player IDs are the replay's own (`m_iPlayerID` = 2 × slot). Illusions are not removed. Resolving, filtering, diffing and coordinate math all happen in clean.
 - **Null handle:** `16777215` means "no entity" in any handle column.
-- **Sampling:** `snapshot` tables (`gamerules`, `heroes`, `player_resource`, `team_data`) are sampled every 30 ticks (1 s). Event tables (`combatlog`, `wards`, `item_entities`) have exact ticks.
+- **Sampling:** existing `snapshot` tables (`gamerules`, `heroes`, `player_resource`, `team_data`) are sampled every 30 ticks (1 s). `kda_changes` reads every tick and emits the first row and subsequent property changes per entity/index. Event tables (`combatlog`, `wards`, `item_entities`) have exact ticks.
 - **Parquet:** typed columns (int32, int64, float32, boolean, string); null = value absent. Column names may contain dots (e.g. `CBodyComponent.m_cellX`); quote them in Spark SQL with backticks.
 - **Read columns by name, never by position.** Columns may be added. They are never renamed or removed without a contract change.
 
@@ -59,12 +59,13 @@ Writes are idempotent per match: re-parsing a match replaces only its `match_id=
 | `gamerules` | snapshot, 1 Hz | game state |
 | `heroes` | snapshot, 1 Hz | every hero entity (illusions included): position + item handles |
 | `player_resource` | snapshot, 1 Hz | per player: team, hero, level, K/D/A |
+| `kda_changes` | snapshot, every tick, changes only | per player index: initial team/slot/hero/K/D/A and subsequent property changes |
 | `team_data` | snapshot, 1 Hz | per player: gold, XP, last hits, damage, wards, ... |
 | `wards` | entity created / deleted | observer and sentry wards |
 | `item_entities` | entity created / deleted | every item entity, with its name index |
 
 Columns common to the kinds:
-- snapshot: `match_id`, `tick` (multiple of 30), `handle` (entity handle), `class` (entity class), then the properties.
+- snapshot: `match_id`, `tick` (multiple of the table's sampling interval), `handle` (entity handle), `class` (entity class), then the properties. The default interval is 30 ticks; `kda_changes` uses 1.
 - snapshot over an array: same plus `index` (array position). Unused array entries (all properties null) are not written.
 - created / deleted: `match_id`, `tick` (exact), `event` (`created` / `deleted`), `handle` (pairs the two rows), `class`, then the properties. Entities still alive at replay end have no `deleted` row.
 
@@ -149,6 +150,25 @@ Snapshot of `CDOTA_PlayerResource`, over the player arrays (`index` = player arr
 | `m_vecPlayerTeamData.m_iTeamSlot` | int | 0–4 within the team |
 | `m_vecPlayerTeamData.m_nSelectedHeroID` | int | Valve numeric hero ID |
 | `m_vecPlayerTeamData.m_iLevel`, `.m_iKills`, `.m_iDeaths`, `.m_iAssists` | int | |
+
+### `kda_changes`
+
+Raw `CDOTA_PlayerResource` counters, inspected every tick. Columns are `match_id`,
+`tick`, `handle`, `class`, `index` and:
+
+- `m_vecPlayerData.m_iPlayerTeam`
+- `m_vecPlayerTeamData.m_iTeamSlot`
+- `m_vecPlayerTeamData.m_nSelectedHeroID`
+- `m_vecPlayerTeamData.m_iKills`
+- `m_vecPlayerTeamData.m_iDeaths`
+- `m_vecPlayerTeamData.m_iAssists`
+
+All six properties are integers. The first nonempty property tuple is emitted per
+entity/index, including zero counters. Later rows are emitted only when any of
+these properties changes, including team/slot/hero changes. Counter differences
+are calculated in clean; raw values are not changed. A wholly absent array entry
+is skipped and resets that entry's change baseline. Older parsed matches need
+this table added before passing the updated parse contract.
 
 ### `team_data`
 
