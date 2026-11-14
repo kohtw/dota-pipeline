@@ -99,6 +99,10 @@ both attacker and target and identifies self-damage. Other heroes appear as targ
 comparison players. An absent bar means no damage recorded for that pair. The **Attack and ability
 breakdown** lists attacker, target, self-damage status, source, damage and recorded hits.
 
+Kill participation uses credited kills plus eligible assists on kills credited to the
+player's team. The count beside the percentage uses that same numerator. Unusual
+same-team assist credit stays in the displayed K/D/A but does not increase participation.
+
 ## Match search
 
 The **Find a match** form accepts a numeric match ID with optional surrounding whitespace and

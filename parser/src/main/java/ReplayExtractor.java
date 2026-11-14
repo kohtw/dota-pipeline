@@ -48,6 +48,8 @@ import java.util.TreeMap;
  *   snapshot      every sample_ticks: one row per entity whose class matches, with the listed props.
  *                 With index_count, props containing "{i}" are read per array index (0..index_count-1);
  *                 indexes whose values are all null (unused array entries) are skipped.
+ *                 A table may override sample_ticks and set changes_only to emit the initial
+ *                 properties and subsequent changes, without converting counters to deltas.
  *   lifecycle     one row when a matching entity is created and one when it is deleted, with the listed props
  * Every row starts with match_id (and tick, except for file_* and string_table).
  * Class patterns: exact class name, or a prefix ending in "*".
@@ -92,7 +94,7 @@ public final class ReplayExtractor {
         // Clarity keeps one processor instance per class, so all entity tables share one EntityTables
         var processors = new ArrayList<Object>();
         var strings = new StringTableReader();
-        var entityTables = new EntityTables(emit, matchId, spec.sampleTicks);
+        var entityTables = new EntityTables(emit, matchId);
         processors.add(entityTables);
         for (var t : spec.tables) {
             switch (t.kind) {
@@ -161,21 +163,21 @@ public final class ReplayExtractor {
         final List<Table> lifecycles = new ArrayList<>();
         private final Emit emit;
         private final long matchId;
-        private final int sampleTicks;
         @Insert private Context ctx;
         @Insert private Entities entities;
 
-        EntityTables(Emit emit, long matchId, int sampleTicks) {
+        EntityTables(Emit emit, long matchId) {
             this.emit = emit;
             this.matchId = matchId;
-            this.sampleTicks = sampleTicks;
         }
 
         @OnTickStart
         public void onTickStart(boolean synthetic) throws Exception {
             int tick = ctx.getTick();
-            if (synthetic || tick % sampleTicks != 0) return;
-            for (Table t : snapshots) snapshot(t, tick);
+            if (synthetic) return;
+            for (Table t : snapshots) {
+                if (tick % t.sampleTicks == 0) snapshot(t, tick);
+            }
         }
 
         @OnEntityCreated
@@ -201,15 +203,23 @@ public final class ReplayExtractor {
                 var head = List.<Object>of(matchId, tick, e.getHandle(), e.getDtClass().getDtName());
                 if (t.indexCount == 0) {
                     var row = new ArrayList<>(head);
-                    for (String p : t.props) row.add(prop(e, p));
-                    emit.row(t, row);
+                    var vals = new ArrayList<Object>();
+                    for (String p : t.props) vals.add(prop(e, p));
+                    if (t.shouldEmit(e.getHandle(), -1, vals)) {
+                        row.addAll(vals);
+                        emit.row(t, row);
+                    }
                     continue;
                 }
                 for (int i = 0; i < t.indexCount; i++) {
                     String idx = String.format("%04d", i);
                     var vals = new ArrayList<Object>();
                     for (String p : t.props) vals.add(prop(e, p.replace("{i}", idx)));
-                    if (vals.stream().allMatch(v -> v == null)) continue;
+                    if (vals.stream().allMatch(v -> v == null)) {
+                        t.forget(e.getHandle(), i);
+                        continue;
+                    }
+                    if (!t.shouldEmit(e.getHandle(), i, vals)) continue;
                     var row = new ArrayList<>(head);
                     row.add(i);
                     row.addAll(vals);
@@ -226,13 +236,28 @@ public final class ReplayExtractor {
     // ---------------------------------------------------------------- spec
 
     record Col(String name, String type) implements java.io.Serializable {}
+    record SnapshotKey(int handle, int index) implements java.io.Serializable {}
 
     static final class Table implements java.io.Serializable {
         String name, kind, stringTable;
         List<String> classes = List.of();
         List<String> props = new ArrayList<>();  // property paths, "{i}" = array index placeholder
         int indexCount;
+        int sampleTicks;
+        boolean changesOnly;
+        final Map<SnapshotKey, List<Object>> previousValues = new LinkedHashMap<>();
         List<Col> cols = new ArrayList<>();      // output columns, in row order
+
+        boolean shouldEmit(int handle, int index, List<Object> values) {
+            if (!changesOnly) return true;
+            // Copy because later reads must not mutate the retained baseline.
+            var old = previousValues.put(new SnapshotKey(handle, index), new ArrayList<>(values));
+            return !values.equals(old);
+        }
+
+        void forget(int handle, int index) {
+            previousValues.remove(new SnapshotKey(handle, index));
+        }
 
         boolean matches(Entity e) {
             String cls = e.getDtClass().getDtName();
@@ -251,12 +276,16 @@ public final class ReplayExtractor {
             JsonNode root = new ObjectMapper().readTree(json);
             var spec = new Spec();
             spec.sampleTicks = root.path("sample_ticks").asInt(30);
+            if (spec.sampleTicks < 1) throw new IllegalArgumentException("sample_ticks must be positive");
             for (JsonNode n : root.get("tables")) {
                 var t = new Table();
                 t.name = n.get("name").asText();
                 t.kind = n.get("kind").asText();
                 t.stringTable = n.path("string_table").asText(null);
                 t.indexCount = n.path("index_count").asInt(0);
+                t.sampleTicks = n.path("sample_ticks").asInt(spec.sampleTicks);
+                t.changesOnly = n.path("changes_only").asBoolean(false);
+                if (t.sampleTicks < 1) throw new IllegalArgumentException("sample_ticks must be positive: " + t.name);
                 var classes = new ArrayList<String>();
                 n.path("classes").forEach(c -> classes.add(c.asText()));
                 t.classes = classes;

@@ -1,4 +1,6 @@
 import io
+import runpy
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -52,6 +54,14 @@ def test_extra_columns_are_allowed():
     assert check(store(heroes=table("heroes", m_iHealth=[100])))["heroes"] == 1
 
 
+def test_per_tick_counters_are_required_for_newly_complete_parses():
+    with pytest.raises(contract.ContractError, match="kda_changes: no data"):
+        check(store(kda_changes=None))
+    t = table("kda_changes").drop_columns(["m_vecPlayerTeamData.m_iAssists"])
+    with pytest.raises(contract.ContractError, match="kda_changes: missing columns"):
+        check(store(kda_changes=t))
+
+
 def test_missing_column_fails():
     t = table("heroes").drop_columns(["CBodyComponent.m_vecX"])
     with pytest.raises(contract.ContractError, match=r"heroes: missing columns \['CBodyComponent.m_vecX'\]"):
@@ -94,3 +104,28 @@ def test_unparsed_skips_exhausted_replays_but_keeps_two_failures():
     failed += [attempts.failure_key("parsed", 2, r) for r in runs[:2]]
     failed += [attempts.failure_key("clean", 3, r) for r in runs]
     assert contract.unparsed(replays, [], failed) == [3, 2]
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "data"  # committed parser output of the reference demos: data/parsed/{table}/match_id={id}/
+PARSED = sorted(int(p.name.removeprefix("match_id=")) for p in (DATA / "parsed" / contract.COMPLETE).iterdir())
+
+
+@pytest.mark.parametrize("match_id", PARSED)
+def test_committed_parser_output_passes_the_contract(match_id: int):
+    def list_keys(prefix: str) -> list[str]:
+        folder = DATA / prefix
+        return [p.relative_to(DATA).as_posix() for p in folder.rglob("*") if p.is_file()] if folder.is_dir() else []
+
+    contract.check_parsed(match_id, lambda key: (DATA / key).read_bytes(), list_keys)
+
+
+def test_replay_spec_still_extracts_every_required_column():
+    """contract.py and replay_spec.py are kept in sync by hand; this catches a column dropped from the spec."""
+    spec = runpy.run_path(str(ROOT / "spark_jobs" / "replay_spec.py"))["SPEC"]
+    assert {t["name"] for t in spec["tables"]} == set(contract.REQUIRED_COLUMNS)
+    added_by_extractor = {"tick", "handle", "class", "index", "event"}
+    for t in spec["tables"]:
+        if t["kind"] in ("snapshot", "lifecycle"):  # other kinds have fixed columns set in ReplayExtractor.java
+            props = {p.replace("{i}.", "") for p, _ in t["props"]}
+            assert set(contract.REQUIRED_COLUMNS[t["name"]]) - props - added_by_extractor == set(), t["name"]

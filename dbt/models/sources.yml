@@ -10,7 +10,28 @@ sources:
       - name: positions
       - name: damage_events
       - name: deaths
+        description: "Scoreboard-counted deaths; direct last hitter and credited killer are separate."
+        columns:
+          - name: credited_killer_slot
+            description: "Player receiving scoreboard kill credit; NULL when no player received credit."
+            data_tests:
+              - accepted_values:
+                  arguments: {values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], quote: false}
+          - name: link_status
+            description: "Attribution confidence retained by the counter-based cleaner."
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments: {values: [exact, participant_assumed, same_side_possible]}
       - name: death_assists
+        description: "All counter-established assists, including same-side credit."
+        columns:
+          - name: same_side
+            description: "True when the credited assister and victim are on the same team; allowed credit."
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments: {values: [true, false], quote: false}
       - name: purchases
       - name: final_inventory
 

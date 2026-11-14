@@ -27,8 +27,9 @@ REQUIRED_COLUMNS = {
     "positions": ("player_slot", "tick", "game_time_s", "x", "y"),
     "damage_events": ("tick", "game_time_s", "attacker_name", "target_name", "inflictor_name",
                       "attacker_slot", "target_slot", "damage", "hits"),
-    "deaths": ("tick", "game_time_s", "victim_slot", "killer_slot", "killer_name"),
-    "death_assists": ("tick", "victim_slot", "assist_slot"),
+    "deaths": ("tick", "game_time_s", "victim_slot", "killer_slot", "killer_name",
+               "credited_killer_slot", "link_status"),
+    "death_assists": ("tick", "victim_slot", "assist_slot", "same_side"),
     "purchases": ("tick", "game_time_s", "player_slot", "item_name", "quantity"),
     "final_inventory": ("player_slot", "inventory_slot", "item_name"),
 }
@@ -37,6 +38,7 @@ REQUIRED_COLUMNS = {
 # (death_assists) or with no purchase logged (purchases), so only those two may be empty.
 MAY_BE_EMPTY = ("death_assists", "purchases")
 TEAMS = (2, 3)  # 2 Radiant, 3 Dire
+LINK_STATUSES = ("exact", "participant_assumed", "same_side_possible")
 
 
 class CleanContractError(Exception):
@@ -76,6 +78,23 @@ def check_table(name: str, table, match_id: int) -> int:
     rows = table.num_rows
     if rows == 0 and name not in MAY_BE_EMPTY:
         raise CleanContractError(f"{name}: no rows")
+    if name == "deaths":
+        import pyarrow as pa
+
+        credit = table.column("credited_killer_slot")
+        labels = table.column("link_status")
+        if not pa.types.is_integer(credit.type):
+            raise CleanContractError("deaths: credited_killer_slot must be integer")
+        if any(value is not None and value not in range(10) for value in credit.to_pylist()):
+            raise CleanContractError("deaths: credited_killer_slot must be NULL or 0-9")
+        if not pa.types.is_string(labels.type) or any(value not in LINK_STATUSES for value in labels.to_pylist()):
+            raise CleanContractError("deaths: link_status must be a non-null supported credit label")
+    if name == "death_assists":
+        import pyarrow as pa
+
+        sides = table.column("same_side")
+        if not pa.types.is_boolean(sides.type) or sides.null_count:
+            raise CleanContractError("death_assists: same_side must be a non-null boolean")
     if name == "matches":
         if rows != 1:
             raise CleanContractError(f"matches: {rows} rows, expected 1")

@@ -24,6 +24,8 @@ def test_scoreboard_maps_mart_rows(dashboard_database, warehouse_config, scorebo
     assert players[1]["main_inventory"] is None
     query, params = scoreboard_cursor.execute.call_args.args
     assert "WHERE s.match_id = %s" in query
+    assert "kp.kill_involvements" in query
+    assert "kp.kills_from_events + kp.assists_from_events" not in query
     assert params == (MATCH_ID,)
     dashboard_database.open_postgres_database.assert_called_once_with(warehouse_config)
 

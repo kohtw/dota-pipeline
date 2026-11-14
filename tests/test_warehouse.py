@@ -110,6 +110,37 @@ def test_load_match_rolls_back_and_reraises_on_a_failed_insert():
     assert conn.rollbacks == 1 and conn.commits == 0 and conn.cur.closed
 
 
+def test_loader_preserves_credit_separately_from_last_hitter_and_side_labels():
+    present = {
+        "deaths": {"tick": [80], "game_time_s": [1.0], "victim_slot": [5],
+                   "killer_slot": pa.array([None], type=pa.int32()), "killer_name": ["tower"],
+                   "credited_killer_slot": [0], "link_status": ["participant_assumed"]},
+        "death_assists": {"tick": [80], "victim_slot": [5], "assist_slot": [6], "same_side": [True]},
+    }
+    objects = {warehouse.clean_prefix(name, MATCH) + "part-0.parquet": parquet_bytes(columns)
+               for name, columns in present.items()}
+    inserts = []
+    conn = FakeConn()
+    counts = warehouse.load_match(MATCH, objects.__getitem__,
+        lambda p: [k for k in objects if k.startswith(p)], conn,
+        execute_values=lambda cur, sql, rows: inserts.append((sql, rows)))
+    assert counts["deaths"] == counts["death_assists"] == 1
+    assert "credited_killer_slot, link_status" in inserts[0][0]
+    assert inserts[0][1] == [(MATCH, 80, 1.0, 5, None, "tower", 0, "participant_assumed")]
+    assert inserts[1][1] == [(MATCH, 80, 5, 6, True)]
+    assert conn.commits == 1
+
+
+def test_loader_rejects_legacy_death_files_and_rolls_back():
+    objects = {warehouse.clean_prefix("deaths", MATCH) + "part-0.parquet": parquet_bytes({
+        "tick": [80], "game_time_s": [1.0], "victim_slot": [5], "killer_slot": [0], "killer_name": ["hero"]})}
+    conn = FakeConn()
+    with pytest.raises(warehouse.clean_contract.CleanContractError, match="credited_killer_slot"):
+        warehouse.load_match(MATCH, objects.__getitem__, lambda p: [k for k in objects if k.startswith(p)],
+                             conn, execute_values=lambda *args: pytest.fail("Legacy credit must not insert"))
+    assert conn.rollbacks == 1 and conn.commits == 0
+
+
 def test_connect_requires_a_password(monkeypatch):
     monkeypatch.delenv("WAREHOUSE_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="WAREHOUSE_PASSWORD"):

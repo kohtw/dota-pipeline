@@ -17,7 +17,7 @@ from dota.assets import STEAM_RAW
 from dota.config import API_RETRY
 
 # dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
-N_MATCHES = 50  # default replays per run
+N_MATCHES = 20  # default replays per run
 MATCHES_VAR = "matches_per_run"  # Airflow Variable: overrides N_MATCHES (e.g. a small test run, or a bigger quota)
 BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
 PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages per run; the loop stops once it has N_MATCHES ids (usually ~2 pages)

@@ -1,7 +1,8 @@
 """Loads the clean Parquet tables into Postgres schema `clean`, the step between the Spark
-clean job and dbt (see docs/clean-contract.md). The load is a straight copy: Parquet and
-Postgres share column names. The only rule is idempotency per match -- delete that match_id,
-insert its rows, in one transaction -- so re-running a match replaces it and never doubles it.
+clean job and dbt (see docs/clean-contract.md). The load copies Parquet columns unchanged,
+after checking the counter-credit fields. It never infers credited killers or default
+labels from legacy data. Loading is idempotent per match: delete that match_id and insert
+its rows in one transaction, so re-running a match replaces it and never doubles it.
 
 Spark writes `clean/{table}/match_id={id}/part-*.parquet`, partitioned by match_id, so the
 part files do NOT carry a match_id column: it lives in the path. This module injects it back
@@ -14,6 +15,8 @@ import os
 import re
 from pathlib import Path
 from typing import Callable
+
+from dota import clean_contract
 
 # Loaded in this order (no foreign keys, so order is free). Must match warehouse/init and
 # docs/clean-contract.md. A table with no part files for a match is cleared, not an error:
@@ -112,7 +115,12 @@ def load_match(match_id: int, read: Callable[[str], bytes],
             if not parts:
                 counts[table] = 0  # cleared above; Spark wrote nothing for this table
                 continue
-            columns, rows = rows_from_parquet(_read_table(parts, read), match_id)
+            parquet = _read_table(parts, read)
+            if table in {"deaths", "death_assists"}:
+                # Never turn legacy last hitters into scoreboard credit or supply
+                # invented default labels. Copy validated new fields unchanged.
+                clean_contract.check_table(table, parquet, match_id)
+            columns, rows = rows_from_parquet(parquet, match_id)
             if rows:
                 execute_values(cur, insert_sql(table, columns), rows)
             counts[table] = len(rows)

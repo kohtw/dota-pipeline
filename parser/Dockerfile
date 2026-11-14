@@ -6,7 +6,7 @@ FROM eclipse-temurin:21-jdk AS build
 WORKDIR /src
 COPY parser/ .
 # strip CRLF in case git checked gradlew out with Windows line endings
-RUN sed -i 's/\r$//' gradlew && chmod +x gradlew && ./gradlew extractorJars s3aJars --no-daemon
+RUN sed -i 's/\r$//' gradlew && chmod +x gradlew && ./gradlew extractorTests extractorJars s3aJars --no-daemon
 
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
