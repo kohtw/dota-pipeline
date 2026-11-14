@@ -112,7 +112,7 @@ From `DOTA_COMBATLOG_DEATH` rows whose target is a real hero.
 
 **Grain:** one player credited with an assist on one death. **Key:** `(match_id, tick, victim_slot, assist_slot)`.
 
-Split the `;`-separated `assist_players` string of the death row; each player ID divided by 2 is an `assist_slot`.
+Split the `;`-separated `assist_players` string of the death row; each value is already an `assist_slot` (0-9). Do not divide by 2. The killer is included in the list, so drop `killer_slot` when counting assists (verified on 10 matches).
 
 ### `purchases`
 
@@ -139,17 +139,19 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 
 Later: `death_context`, `economy_gap`.
 
-## Assumptions to verify on a real parsed match
+## Assumptions checked on real parsed matches (14 Nov)
 
-Written from the raw contract alone. Nobody has checked these against real Parquet yet.
+Checked read-only on the 10 parsed matches in `data/parsed/`.
 
-1. `heroes.m_iPlayerID / 2` equals `players.slot` (raw contract says `m_iPlayerID = 2 x slot`).
-2. Combat-log flag columns exist under the names used (`attacker_hero`, `target_hero`, `attacker_illusion`, `target_illusion`). Raw contract lists only `attacker_hero` and `target_illusion` as examples.
-3. `assist_players` holds the same IDs as `m_iPlayerID`.
-4. A PURCHASE row's `target` is the buyer and `value` is a `names` index.
-5. `m_flGameEndTime` is set by the last `gamerules` row.
-6. Steam tables (`steam_matches`, `steam_players`) are not defined yet. See the next section for what is already known.
-7. The last `player_stats` snapshot of a match is assumed complete (not a truncated or post-game row). Unchecked.
+1. ✅ `heroes.m_iPlayerID / 2` equals `players.slot` (raw contract says `m_iPlayerID = 2 x slot`).
+2. ✅ Combat-log flag columns exist under the names used (`attacker_hero`, `target_hero`, `attacker_illusion`, `target_illusion`).
+3. ❌ **Wrong.** `assist_players` holds slots 0-9, not `m_iPlayerID`, and includes the killer. Fixed in `death_assists` above. `spark_jobs/clean_replays.py` already does this.
+4. ✅ A PURCHASE row's `target` is the buyer and `value` is a `names` index.
+5. ✅ `m_flGameEndTime` is set by the last `gamerules` row.
+6. Steam tables are defined: see `docs/steam-lane.md` (`stg.steam_*`).
+7. ✅ The last `player_resource` tick equals the last `gamerules` tick in all 10 matches, at 1 s spacing.
+
+Known open issue: K/D/A rebuilt from kill events differs from the final snapshot for 21 of 100 players (8 of 10 matches), for example 3 events where killer equals victim. The clean job blocks completion on such a disagreement, so those matches may not reach the marts. Kill and assist credit is still unresolved.
 
 ## Verified against real Steam pages (10 Nov)
 

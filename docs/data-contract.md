@@ -103,7 +103,7 @@ Core columns, always first:
 | `inflictor_name_idx` | int | Index into `names` (ability, item or modifier) |
 | `value` | int | Meaning depends on `type` |
 
-The remaining ~72 columns follow alphabetically, in snake_case of the Clarity field (e.g. `gold_reason`, `xp_reason`, `health`, `location_x`, `location_y`, `attacker_team`, `target_team`, `attacker_hero`, `target_illusion`, `stun_duration`, `networth`). The other name fields are also indexes (`damage_source_name_idx`, `target_source_name_idx`). `assist_players` is a `;`-separated string of player IDs.
+The remaining ~72 columns follow alphabetically, in snake_case of the Clarity field (e.g. `gold_reason`, `xp_reason`, `health`, `location_x`, `location_y`, `attacker_team`, `target_team`, `attacker_hero`, `target_illusion`, `stun_duration`, `networth`). The other name fields are also indexes (`damage_source_name_idx`, `target_source_name_idx`). `assist_players` is a `;`-separated string of player slots (0-9, not `m_iPlayerID`), and includes the killer.
 
 ### `names` / `entity_names`
 
