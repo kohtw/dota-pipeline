@@ -1,10 +1,13 @@
 """Render aggregate hero statistics from records supplied by the application."""
 
 from collections import Counter
+from collections.abc import Callable
 
 import streamlit as st
 
 from components import format_number, format_percentage
+from postgres_connection import DashboardDatabaseError
+from hero_matchups import render_hero_matchups
 
 
 def select_hero() -> None:
@@ -29,15 +32,63 @@ def _render_hero_details(hero: dict) -> None:
     picks_column.metric("Picks", format_number(hero["picks"]))
     wins_column.metric("Wins", format_number(hero["wins"]))
     losses_column.metric("Losses", format_number(hero["losses"]))
-    st.caption("Rates are shown alongside their pick counts; small samples can give unstable win rates. — means unavailable.")
+    st.caption("— means unavailable.")
 
 
-def render_hero_statistics(heroes: list[dict]) -> None:
+def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]) -> None:
+    """Keep an optional profile failure independent of pick/win statistics."""
+    st.subheader("Performance profile")
+    try:
+        profile = loader(hero["hero_id"])
+    except DashboardDatabaseError:
+        st.warning("The performance profile could not be loaded. Pick/win statistics remain available. Try again after the hero marts have been built.")
+        return
+    if profile is None:
+        st.caption("No performance profile available for this hero yet.")
+        return
+    if profile["appearances"] != hero["picks"] or profile["wins"] != hero["wins"]:
+        st.warning("The hero summaries are out of sync. Rebuild both hero marts before comparing performance.")
+        return
+    appearances = profile["appearances"]
+    st.caption(
+        f"Full-match averages across {appearances:,} appearances. "
+        f"Average match length: {profile['avg_match_duration_s'] / 60:.1f} minutes. "
+    )
+    groups = (
+        ("Combat", (("Kills", "avg_kills", "kills"), ("Deaths", "avg_deaths", "deaths"),
+                    ("Assists", "avg_assists", "assists"))),
+        ("Economy", (("Gold / min", "avg_gpm", "gpm"), ("XP / min", "avg_xpm", "xpm"))),
+        ("Contribution", (("Hero damage / min", "avg_hero_damage_per_min", "hero_damage"),
+                          ("Hero healing / min", "avg_hero_healing_per_min", "hero_healing"),
+                          ("Tower damage / min", "avg_tower_damage_per_min", "tower_damage"))),
+    )
+    for column, (title, metrics) in zip(st.columns(3), groups):
+        with column.container(border=True, height="stretch"):
+            st.markdown(f"### {title}")
+            st.caption("Per match" if title == "Combat" else "Per minute")
+            for index, (label, metric, coverage) in enumerate(metrics):
+                if index:
+                    st.divider()
+                average = profile[metric]
+                st.metric(label, "—" if average is None else f"{average:,.1f}",
+                          help="Average among appearances with this metric recorded. Missing values are excluded; recorded zeros count.")
+                observed = profile[coverage + "_observations"]
+                if observed != appearances:
+                    st.caption(f"Recorded in {observed:,} of {appearances:,} appearances")
+    st.caption(
+        "Each match has equal weight. Missing values are excluded; — means unavailable. "
+        "Metrics use all appearances above unless a smaller recorded count is shown."
+    )
+
+
+def render_hero_statistics(
+    heroes: list[dict], *, performance_loader: Callable[[int], dict | None] | None = None,
+    matchup_loader: Callable[[int], list[dict]] | None = None,
+) -> None:
     """Show dataset coverage, one hero's results and a sortable comparison table."""
     st.title("Hero statistics")
     st.caption(
-        "Collected ranked All Pick matches: at least 15 minutes, ten human players and a known result. "
-        "These statistics describe the collected sample."
+        "Ranked All Pick matches: at least 15 minutes, ten human players and a known result."
     )
     if not heroes:
         st.info("No hero statistics available yet.")
@@ -84,6 +135,10 @@ def render_hero_statistics(heroes: list[dict]) -> None:
             # Recording the default also makes a refreshed link independent of later label ordering.
             select_hero()
         _render_hero_details(by_id[selected_id])
+        if performance_loader is not None:
+            _render_performance_profile(by_id[selected_id], performance_loader)
+        if matchup_loader is not None:
+            render_hero_matchups(by_id[selected_id], matchup_loader)
 
     st.subheader("Compare heroes")
     minimum_picks = st.number_input("Minimum picks", min_value=1, value=1, step=1, key="hero_stats_minimum_picks")

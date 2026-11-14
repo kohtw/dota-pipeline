@@ -9,6 +9,16 @@ The Steam lane loads match summaries from the Steam Web API method `GetMatchHist
 The loader only flattens. It does not filter matches or apply rules. Rules such as "ranked All Pick
 only" live in dbt (`stg_steam_ranked`).
 
+`stg_steam_ranked` also exposes Steam GPM, XPM, hero damage, hero healing and tower
+damage without replacing missing values. `hero_performance_summary` aggregates these
+fields by hero. See its [column definitions and calculation rules](hero-performance-contract.md).
+
+`hero_matchup_summary` uses the same qualifying sample to pair known
+heroes on opposing teams. Staging tests check valid Steam slots and unique non-null
+heroes within a match. See the [matchup contract](hero-matchup-contract.md) for its
+columns and counting rules. It describes whole-match results against enemy heroes,
+not lane performance or direct combat.
+
 DDL: `warehouse/init/04_steam_tables.sql`. Loader: `dags/dota/steam_summary.py`.
 
 ## Tables

@@ -25,13 +25,14 @@ def warehouse_config(dashboard_database):
 def scoreboard_rows():
     """Represent a controlled mart result with both teams and optional statistics."""
     players = [
-        (0, "antimage", 2, 2, 1, 0, 6000, 400, "item_blink,item_desolator", True, 2 / 3, 3, 2),
+        (0, "antimage", 2, 2, 1, 0, 6000, 400, ["Blink Dagger", "Desolator"], True, 2 / 3, 3, 2),
         (1, "crystal_maiden", 2, 1, 1, 2, 3000, 200, None, True, 1.0, 3, 3),
         (5, "axe", 3, 1, 2, 0, 5000, 300, None, False, 0.5, 2, 1),
         (6, "lina", 3, 1, 1, 1, 3500, 250, None, False, 1.0, 2, 2),
     ]
     return [
-        dict(match_id=9000000001, slot=slot, hero=f"npc_dota_hero_{hero}", team=team,
+        dict(match_id=9000000001, slot=slot, hero=f"npc_dota_hero_{hero}",
+             hero_label={"antimage": "Anti-Mage", "crystal_maiden": "Crystal Maiden", "axe": "Axe", "lina": "Lina"}[hero], team=team,
              kills=kills, deaths=deaths, assists=assists, last_hits=80, denies=10,
              net_worth=net_worth, gold=gold, final_items=items, duration_s=600.0,
              won=won, kill_participation=kp, team_kills=team_kills, kill_involvements=involvements)

@@ -10,7 +10,9 @@ from math import ceil, floor, fsum
 import streamlit as st
 
 from charts import build_damage_chart, build_progression_chart
-from components import MISSING_VALUE, format_duration, format_items, format_number, format_percentage
+from components import MISSING_VALUE, format_duration, format_number, format_percentage
+from inventory import render_inventory
+from team_advantage import render_team_advantage
 
 
 TEAM_LABELS = {2: "Radiant", 3: "Dire"}
@@ -43,8 +45,8 @@ def _render_hero_damage(
     """Display full-match hero damage summaries, target bars and source rows."""
     st.subheader("Hero damage dealt")
     st.caption(
-        "Full match. Team share uses all hero damage dealt by the attacker's team. "
-        "Creep and tower damage are excluded."
+        "Full-match recorded damage to heroes, including self-damage such as health sacrificed "
+        "by abilities. Creep and tower damage are excluded."
     )
 
     target_labels = {}
@@ -78,26 +80,38 @@ def _render_hero_damage(
             shares.append(share)
             source = row["source"]
             source_rows.append({
-                "Attacker": label,
-                "Target": target,
+                "Attacker (dealt damage)": label,
+                "Target (received damage)": target,
+                "Damage type": "Self-damage" if target_slot == slot else "Damage to another hero",
                 "Source": "Auto attack" if source == "dota_unknown" else source.replace("_", " ").title(),
                 "Damage": format_number(row["total_damage"]),
                 "Recorded hits": format_number(row["hits"]),
-                "Share of team hero damage": format_percentage(share),
+                "Share of attacker's team damage": format_percentage(share),
             })
 
         # One player's source shares all use the same team total as their denominator.
         summaries.append({
-            "Player": label,
-            "Hero damage dealt": format_number(sum(target_totals.values())),
-            "Share of team hero damage": format_percentage(None if None in shares else fsum(shares)),
+            "Attacker (dealt damage)": label,
+            "Total damage to heroes (includes self)": format_number(sum(target_totals.values())),
+            "Share of own team's hero damage": format_percentage(None if None in shares else fsum(shares)),
         })
         chart_series.append((label, target_totals))
 
     if chart_series:
         st.table(summaries, hide_index=True)
+        st.caption(
+            "Team share = this player's recorded hero damage ÷ their own team's recorded hero damage."
+        )
+        st.markdown("**Who did each player damage?**")
+        st.caption(
+            "Rows are targets receiving damage; colours identify the selected attackers. "
+            "Each bar shows damage dealt by that attacker to that target. Other heroes appear because "
+            "they received damage. A bar on the attacker's own row is self-damage; "
+            "an absent bar means no damage recorded for that pair."
+        )
         st.plotly_chart(build_damage_chart(chart_series), key="hero_damage_by_target")
-        st.caption("Damage by source")
+        st.markdown("**Attack and ability breakdown**")
+        st.caption("Each row identifies who dealt damage, who received it, and the recorded attack or ability.")
         st.table(source_rows, hide_index=True)
 
 
@@ -110,6 +124,8 @@ def render_player_page(
     comparison_snapshots: list[dict] | None = None,
     damage_by_slot: dict[int, list[dict]] | None = None,
     roster: list[dict] | None = None,
+    team_advantage: list[dict] | None = None,
+    inventory_by_slot: dict[int, list[dict] | None] | None = None,
 ) -> None:
     """Display the player page from match records supplied by the app.
 
@@ -125,6 +141,17 @@ def render_player_page(
     match_id = match.get("match_id")
     match_label = str(match_id) if match_id is not None else MISSING_VALUE
     st.caption(f"{team} · Match {match_label}")
+
+    # Keep the full bounds for the team review control, independent of the selected range.
+    observations = snapshots or []
+    comparison_observations = comparison_snapshots or []
+    timed_records = list(observations)
+    if comparison_player is not None:
+        timed_records.extend(comparison_observations)
+    timestamps = [record["game_time_s"] for record in timed_records]
+    start = floor(min(0, min(timestamps, default=0)))
+    end = ceil(max(0, match.get("duration_s") or 0, max(timestamps, default=0)))
+    progression_bounds = (start, end) if timestamps and end > start else None
 
     # Label these as final values so they cannot be confused with measurements
     # at an intermediate game time. Reuse scoreboard formatting to preserve the
@@ -170,27 +197,31 @@ def render_player_page(
         })
         st.table(stat_rows, hide_index=True)
     else:
-        # Separate combat counts from farming and economy values to keep each
-        # row readable without crowding all seven metric cards into one strip.
-        for group in (combat_stats, economy_stats):
-            columns = st.columns(len(group))
-            for column, (label, field) in zip(columns, group):
-                column.metric(label, format_number(player.get(field)))
-        st.metric("Kill participation", _kill_participation_detail(player))
+        groups = (
+            ("Combat", combat_stats),
+            ("Farming", [("Last hits", "last_hits"), ("Denies", "denies")]),
+            ("Economy", [("Net worth", "net_worth"), ("Gold", "gold")]),
+        )
+        for column, (title, metrics) in zip(st.columns(3), groups):
+            with column.container(border=True, height="stretch"):
+                st.markdown(f"### {title}")
+                for index, (label, field) in enumerate(metrics):
+                    if index:
+                        st.divider()
+                    st.metric(label, format_number(player.get(field)))
+        with st.container(border=True):
+            st.metric("Kill participation", _kill_participation_detail(player))
 
-    # Display the final main-inventory snapshot independently of progression charts.
-    # Plain text preserves item names without interpreting them as Markdown.
-    st.subheader("Final main inventory")
-    st.caption(
-        "Main inventory only, including passive items. Backpack, stash, "
-        "neutral-slot items, and consumed upgrades are excluded."
-    )
+    st.subheader("Final inventory")
+    st.caption("Last recorded loadout. Not recorded means no item record is available for that slot.")
+    inventories = inventory_by_slot or {}
     if comparison_player is not None:
         for column, label, participant in zip(st.columns(2), comparison_labels, participants):
-            column.text(label)
-            column.text(format_items(participant.get("main_inventory")))
+            with column:
+                render_inventory(label, inventories.get(participant["slot"]))
     else:
-        st.text(format_items(player.get("main_inventory")))
+        render_inventory(f"{player.get('hero_label') or player.get('hero') or 'Selected player'} · {team}",
+                         inventories.get(player["slot"]))
 
     # The damage mart contains full-match totals with no event timestamps to filter.
     if damage_by_slot is not None:
@@ -201,17 +232,7 @@ def render_player_page(
             selected_players = [(player["slot"], f"{hero} · {team}")]
         _render_hero_damage(selected_players, damage_by_slot, roster or [])
 
-    # Base the shared clock range on both participants' progression samples.
-    observations = snapshots or []
-    comparison_observations = comparison_snapshots or []
-    timed_records = list(observations)
-    if comparison_player is not None:
-        timed_records.extend(comparison_observations)
-
-    timestamps = [record["game_time_s"] for record in timed_records]
     # Keep whole-second slider bounds while including fractional observations.
-    start = floor(min(0, min(timestamps, default=0)))
-    end = ceil(max(0, match.get("duration_s") or 0, max(timestamps, default=0)))
     if timestamps and end > start:
         start, end = st.slider(
             "Progression time range (seconds)",
@@ -220,6 +241,7 @@ def render_player_page(
             value=(start, end),
             key=f"progression_range_{match_id}_{player['slot']}",
         )
+        st.caption("Negative times are pregame before the opening horn; 0:00 marks the start of game time.")
         st.caption(
             f"Showing {_format_game_time(start)} to {_format_game_time(end)} for net worth and XP. "
             "Final statistics and inventory stay at match end; damage and kill participation use full-match totals."
@@ -261,10 +283,17 @@ def render_player_page(
                 chart_series.append(visible)
         if not any(chart_series):
             continue
-        st.caption(f"{description} Markers show observations. Gaps indicate missing measurements.")
+        st.caption(f"{description} Hover for recorded values. Gaps indicate missing measurements.")
         figure = build_progression_chart(
             chart_series[0], metric, progression_players[0][0],
             comparison_snapshots=chart_series[1] if comparison_player is not None else None,
             comparison_label=secondary_label if comparison_player is not None else None,
         )
         st.plotly_chart(figure, key=f"{metric}_{match['match_id']}_{player['slot']}")
+
+    st.divider()
+    render_team_advantage(
+        team_advantage, match_id,
+        progression_key=f"progression_range_{match_id}_{player['slot']}" if progression_bounds else None,
+        progression_bounds=progression_bounds,
+    )

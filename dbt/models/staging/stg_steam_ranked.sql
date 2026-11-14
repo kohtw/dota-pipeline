@@ -3,6 +3,8 @@
 select
     m.match_id, m.start_time, m.duration, m.radiant_win,
     p.player_slot, p.hero_id, p.kills, p.deaths, p.assists,
+    p.gold_per_min, p.xp_per_min,
+    p.hero_damage, p.hero_healing, p.tower_damage,
     -- Radiant occupies slots 0-127, Dire 128 and up
     (p.player_slot < 128) as on_radiant
 from {{ source('stg', 'steam_matches') }} m

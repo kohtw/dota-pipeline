@@ -13,6 +13,38 @@ models:
         data_tests: [not_null]
       - name: gpm
         description: "total_earned_gold per minute of game time"
+      - name: final_items
+        description: "Original comma-separated item_* identifiers in main-slot order, including duplicates."
+      - name: hero_localized_name
+        description: "Valve display name from dim_heroes joined on npc_name. Nullable for unknown heroes; hero_name keeps the replay identifier."
+      - name: final_item_labels
+        description: "JSON array of Valve display names from dim_items, in main-slot order including duplicates. Unknown or unnamed items retain their internal name for the dashboard fallback. NULL when no main-inventory rows exist."
+
+  - name: match_inventory
+    description: "One occupied player item slot at the final recorded hero snapshot, from clean.final_inventory. Includes main inventory, backpack, stash, teleport and neutral slots. Empty slots have no row; missing source coverage is not represented as an empty loadout."
+    columns:
+      - name: inventory_key
+        description: "match_id-player_slot-inventory_slot; duplicate items in different slots remain separate rows."
+        data_tests: [not_null, unique]
+      - name: match_id
+        data_tests: [not_null]
+      - name: player_slot
+        data_tests: [not_null]
+      - name: inventory_slot
+        description: "Replay slot: 0-5 main, 6-8 backpack, 9-14 stash, 15 teleport, 16 neutral."
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], quote: false}}
+      - name: location
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: ["main", "backpack", "stash", "teleport", "neutral"]}}
+      - name: item_name
+        description: "Original replay item_* identifier, including items absent from dim_items."
+        data_tests: [not_null]
+      - name: item_display_name
+        description: "Valve localized name; unknown or unnamed items fall back to the internal name with its item_ prefix removed and underscores replaced by spaces."
+        data_tests: [not_null]
 
   - name: player_timeseries
     description: "One player at one second: net worth, unspent gold, XP and more over game time."
@@ -57,3 +89,128 @@ models:
         data_tests: [not_null, unique]
       - name: picks
         data_tests: [not_null]
+
+  - name: hero_performance_summary
+    description: "One row per observed hero in stg_steam_ranked (ranked All Pick, 15+ minutes, 10 humans, known winner; leavers kept): outcomes and average performance. Missing values stay NULL; recorded zeros count. Per-minute metrics are calculated per appearance before averaging. Describes the collected sample, not causal hero strength; skill, role and game version can affect comparisons. See docs/hero-performance-contract.md."
+    columns:
+      - name: hero_id
+        description: "Unique non-null Steam hero ID; heroes with no qualifying appearances are absent."
+        data_tests: [not_null, unique]
+      - name: localized_name
+        description: "Nullable display name from dim_heroes; unknown names do not remove heroes."
+      - name: appearances
+        description: "Number of qualifying player appearances; equals picks in hero_pick_win_rate."
+        data_tests: [not_null]
+      - name: wins
+        description: "Appearances where radiant_win equals on_radiant."
+        data_tests: [not_null]
+      - name: losses
+        description: "Appearances minus wins."
+        data_tests: [not_null]
+      - name: win_rate
+        description: "Wins divided by appearances, as a ratio from 0 to 1; unrounded."
+        data_tests: [not_null]
+      - name: avg_kills
+        description: "Mean recorded final kills; NULL when no observations. Missing values are excluded; recorded zeros contribute."
+      - name: avg_deaths
+        description: "Mean recorded final deaths; NULL when no observations. Missing values are excluded; recorded zeros contribute."
+      - name: avg_assists
+        description: "Mean recorded final assists; NULL when no observations. Missing values are excluded; recorded zeros contribute."
+      - name: avg_gpm
+        description: "Mean Steam-reported gold_per_min; not reconstructed from gold. Missing values are excluded; recorded zeros contribute."
+      - name: avg_xpm
+        description: "Mean Steam-reported xp_per_min. Missing values are excluded; recorded zeros contribute."
+      - name: avg_hero_damage_per_min
+        description: "Mean per-appearance hero_damage / (duration / 60.0); appearances have equal weight. Missing values are excluded; recorded zeros contribute."
+      - name: avg_hero_healing_per_min
+        description: "Mean per-appearance hero_healing / (duration / 60.0); appearances have equal weight. Missing values are excluded; recorded zeros contribute."
+      - name: avg_tower_damage_per_min
+        description: "Mean per-appearance tower_damage / (duration / 60.0); appearances have equal weight. Missing values are excluded; recorded zeros contribute."
+      - name: avg_match_duration_s
+        description: "Mean match duration in seconds across all qualifying appearances."
+        data_tests: [not_null]
+      - name: kills_observations
+        description: "Appearances with non-null kills; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: deaths_observations
+        description: "Appearances with non-null deaths; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: assists_observations
+        description: "Appearances with non-null assists; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: gpm_observations
+        description: "Appearances with non-null gold_per_min; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: xpm_observations
+        description: "Appearances with non-null xp_per_min; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: hero_damage_observations
+        description: "Appearances with non-null hero_damage; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: hero_healing_observations
+        description: "Appearances with non-null hero_healing; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+      - name: tower_damage_observations
+        description: "Appearances with non-null tower_damage; zero when the corresponding average is NULL."
+        data_tests: [not_null]
+
+  - name: hero_matchup_summary
+    description: "One row per ordered hero/opponent pair on opposing teams in stg_steam_ranked: whole-match wins, losses and win rate, with the selected hero's overall pick/win context. Each match contributes at most once per pair. Missing hero IDs are excluded; unknown names remain. No minimum sample threshold. Results describe the collected sample, not lane performance or causal counter strength; other players, skill, roles and game version can affect outcomes. See docs/hero-matchup-contract.md."
+    columns:
+      - name: hero_id
+        description: "Selected Steam hero ID; composite key with opponent_hero_id, checked by hero_matchup_pair_unique."
+        data_tests: [not_null]
+      - name: hero_name
+        description: "Nullable selected hero name from dim_heroes.localized_name."
+      - name: opponent_hero_id
+        description: "Steam hero ID observed on the opposing team; reverse pairs are separate rows."
+        data_tests: [not_null]
+      - name: opponent_name
+        description: "Nullable opponent name from dim_heroes.localized_name. Unknown names do not remove pairs."
+      - name: matches
+        description: "Qualifying matches containing this ordered pair on opposing teams. Counts overlap across opponents and must not be summed as distinct matches."
+        data_tests: [not_null]
+      - name: wins
+        description: "Pairing matches won by the selected hero's team, where radiant_win equals on_radiant."
+        data_tests: [not_null]
+      - name: losses
+        description: "Matches minus wins, from the selected hero's perspective."
+        data_tests: [not_null]
+      - name: win_rate
+        description: "Wins divided by matches, as an unrounded ratio from 0 to 1. Small samples can give unstable rates."
+        data_tests: [not_null]
+      - name: overall_matches
+        description: "Selected hero's picks from hero_pick_win_rate across the same qualifying sample."
+        data_tests: [not_null]
+      - name: overall_win_rate
+        description: "Selected hero's overall win rate from hero_pick_win_rate; includes the pairing being examined."
+        data_tests: [not_null]
+      - name: win_rate_difference_pp
+        description: "100 * (win_rate - overall_win_rate), in percentage points. Descriptive context, not a causal opponent effect."
+        data_tests: [not_null]
+
+  - name: team_advantage_timeline
+    description: "One replay match per aligned ten-second observation time. Complete five-player team net worth, Radiant minus Dire advantage and its exact 120-second change. Partial sums remain NULL; incomplete grid rows are retained. Measures sampled economic position, not win probability. See docs/team-advantage-contract.md."
+    columns:
+      - name: match_id
+        description: "Replay match ID; composite key with observation_time_s."
+        data_tests: [not_null]
+      - name: observation_time_s
+        description: "Game-clock grid time from zero through the last complete ten-second boundary within recorded duration."
+        data_tests: [not_null]
+      - name: radiant_net_worth
+        description: "Sum of five usable Radiant observations, otherwise NULL. Invalid rosters never produce team totals."
+      - name: dire_net_worth
+        description: "Sum of five usable Dire observations, otherwise NULL. One team may remain complete when the other is incomplete."
+      - name: net_worth_advantage
+        description: "Radiant net worth minus Dire net worth; NULL unless both totals are complete."
+      - name: radiant_players_observed
+        description: "Number of usable Radiant snapshots, 0-5 for a valid roster."
+        data_tests: [not_null]
+      - name: dire_players_observed
+        description: "Number of usable Dire snapshots, 0-5 for a valid roster."
+        data_tests: [not_null]
+      - name: max_snapshot_age_s
+        description: "Oldest selected snapshot age across both teams, including stale or invalid-net-worth observations; NULL if none were selected. A coverage diagnostic, not a freshness guarantee."
+      - name: net_worth_advantage_change_120s
+        description: "Current Radiant-minus-Dire advantage minus advantage at exactly 120 seconds earlier; NULL if either endpoint is unavailable."

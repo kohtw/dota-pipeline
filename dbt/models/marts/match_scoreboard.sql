@@ -14,11 +14,14 @@ final_stats as (
 
 -- inventory slots 0-5 only (the six main item slots), in slot order
 items as (
-    select match_id, player_slot,
-           string_agg(item_name, ',' order by inventory_slot) as final_items
-    from {{ source('clean', 'final_inventory') }}
-    where inventory_slot <= 5
-    group by match_id, player_slot
+    select i.match_id, i.player_slot,
+           string_agg(i.item_name, ',' order by i.inventory_slot) as final_items,
+           to_json(array_agg(coalesce(nullif(trim(d.localized_name), ''), i.item_name)
+                             order by i.inventory_slot)) as final_item_labels
+    from {{ source('clean', 'final_inventory') }} i
+    left join {{ ref('dim_items') }} d on d.name = i.item_name
+    where i.inventory_slot between 0 and 5
+    group by i.match_id, i.player_slot
 )
 
 select
@@ -26,6 +29,7 @@ select
     s.match_id,
     s.player_slot,
     p.hero_name,
+    h.localized_name as hero_localized_name,
     p.team,
     p.team = m.winner_team as won,
     s.level,
@@ -43,8 +47,10 @@ select
     s.healing,
     s.total_earned_gold / (m.duration_s / 60.0) as gpm,
     m.duration_s,
-    i.final_items
+    i.final_items,
+    i.final_item_labels
 from final_stats s
 join {{ source('clean', 'players') }} p using (match_id, player_slot)
+left join {{ ref('dim_heroes') }} h on h.npc_name = p.hero_name
 join {{ source('clean', 'matches') }} m using (match_id)
 left join items i using (match_id, player_slot)

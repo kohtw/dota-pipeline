@@ -48,9 +48,10 @@ def test_live_loaders_agree_with_warehouse_marts(dashboard_database):
         expected_damage = cursor.fetchall()
         cursor.execute(
             "SELECT s.player_slot,s.hero_name,s.team,s.won,s.final_items,k.kill_participation,"
-            "CAST(k.team_kills AS BIGINT),k.kill_involvements "
+            "CAST(k.team_kills AS BIGINT),k.kill_involvements,h.localized_name "
             "FROM marts.match_scoreboard s LEFT JOIN marts.kill_participation k "
             "ON k.match_id=s.match_id AND k.player_slot=s.player_slot "
+            "LEFT JOIN marts.dim_heroes h ON h.npc_name=s.hero_name "
             "WHERE s.match_id=%s ORDER BY s.player_slot", (match_id,),
         )
         expected_details = cursor.fetchall()
@@ -59,18 +60,28 @@ def test_live_loaders_agree_with_warehouse_marts(dashboard_database):
     assert dashboard_database.load_available_matches(config) == expected_examples
     assert [(p["slot"], p["kills"], p["deaths"], p["assists"], p["net_worth"], p["gold"])
             for p in players] == expected_scoreboard
-    for player, (slot, hero, team, won, items, kp, team_kills, involvements) in zip(players, expected_details):
+    for player, (slot, hero, team, won, items, kp, team_kills, involvements, hero_name) in zip(players, expected_details):
         assert (player["slot"], player["hero"], player["team"]) == (slot, hero, team)
+        assert player["hero_label"] == (hero_name.strip() if hero_name and hero_name.strip() else
+                                        hero.removeprefix('npc_dota_hero_').replace('_', ' ').title())
         assert player["kill_participation"] == kp
         assert player["team_kills"] == team_kills
         assert player["kill_involvements"] == involvements
-        # Converting display labels back to identifiers checks that no item or slot order was lost.
+        # Check the seed mapping against source inventory in its original slot order.
         if items is None:
             assert player["main_inventory"] is None
         else:
-            assert ["item_" + label.lower().replace(" ", "_") for label in player["main_inventory"]] == [
-                item for item in items.split(",") if item
-            ]
+            with open_postgres_database(config) as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT i.item_name, d.localized_name FROM clean.final_inventory i "
+                    "LEFT JOIN marts.dim_items d ON d.name=i.item_name "
+                    "WHERE i.match_id=%s AND i.player_slot=%s AND i.inventory_slot BETWEEN 0 AND 5 "
+                    "ORDER BY i.inventory_slot", (match_id, slot),
+                )
+                expected_labels = [name.strip() if name and name.strip() else
+                                   raw.removeprefix('item_').replace('_', ' ').title()
+                                   for raw, name in cursor.fetchall()]
+            assert player["main_inventory"] == expected_labels
         if won is True:
             assert match["winner_team"] == team
 
@@ -87,6 +98,32 @@ def test_live_loaders_agree_with_warehouse_marts(dashboard_database):
     }
     _, unavailable = dashboard_database.load_scoreboard(config, -1)
     assert unavailable == []
+
+
+def test_live_inventory_loader_preserves_exact_slots_and_player_selection(dashboard_database):
+    from config import load_warehouse_config
+    from postgres_connection import open_postgres_database
+
+    config = load_warehouse_config()
+    match_id = int(os.environ["DASHBOARD_TEST_MATCH_ID"])
+    _, players = dashboard_database.load_scoreboard(config, match_id)
+    primary, comparison = players[0]["slot"], players[-1]["slot"]
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT player_slot,inventory_slot,location,item_name,item_display_name "
+            "FROM marts.match_inventory WHERE match_id=%s AND player_slot IN (%s,%s) "
+            "ORDER BY player_slot,inventory_slot", (match_id, primary, comparison),
+        )
+        expected = cursor.fetchall()
+    inventory = dashboard_database.load_player_inventory(config, match_id, primary, comparison)
+    assert set(inventory) == {primary, comparison}
+    assert [(slot, item["inventory_slot"], item["location"], item["item_name"], item["item_display_name"])
+            for slot in sorted(inventory) for item in inventory[slot] or []] == expected
+    single = dashboard_database.load_player_inventory(config, match_id, primary)
+    assert single == {primary: inventory[primary]}
+    assert dashboard_database.load_player_inventory(config, -1, primary, comparison) == {
+        primary: None, comparison: None,
+    }
 
 
 def test_live_connection_limits_and_error_cleanup(dashboard_database):
@@ -146,12 +183,31 @@ def test_live_app_renders_players_comparison_and_hero_route(dashboard_database):
     assert not app.exception
     assert not app.error
     assert app.title[0].value == players[0]["hero_label"]
+    inventories = dashboard_database.load_player_inventory(
+        load_warehouse_config(), match_id, players[0]["slot"], players[-1]["slot"],
+    )
+
+    def expected_loadout(slot):
+        records = inventories[slot]
+        if not records:
+            return []
+        labels = {row["inventory_slot"]: row["item_display_name"] for row in records}
+        order = [*range(9), 16, 15, *range(9, 15)]
+        return [labels.get(index, "Not recorded") for index in order]
+
+    assert "Final inventory" in [heading.value for heading in app.subheader]
+    assert [text.value for text in app.text][1:] == expected_loadout(players[0]["slot"])
+    assert all(not expander.proto.expanded for expander in app.expander if expander.label == "Stash")
 
     app.selectbox[0].select(players[-1]["slot"]).run(timeout=30)
     assert not app.exception
     assert not app.error
     stats = app.table[0].value.set_index("Metric")
     assert stats.loc["Kills"].tolist() == [str(players[0]["kills"]), str(players[-1]["kills"])]
+    inventory_text = [text.value for text in app.text]
+    first_loadout = expected_loadout(players[0]["slot"])
+    assert inventory_text[1:1 + len(first_loadout)] == first_loadout
+    assert inventory_text[2 + len(first_loadout):] == expected_loadout(players[-1]["slot"])
     app.button(key="player_back").click().run(timeout=30)
     assert not app.exception
     assert not app.error
@@ -182,7 +238,8 @@ def test_live_app_renders_players_comparison_and_hero_route(dashboard_database):
     assert app.title[0].value == "Hero statistics"
     if heroes:
         assert app.selectbox(key="hero_stats_selected_id").value in {hero["hero_id"] for hero in heroes}
-        assert len(app.dataframe[0].value) == len(heroes)
+        comparison = next(frame.value for frame in app.dataframe if "Hero" in frame.value.columns)
+        assert len(comparison) == len(heroes)
     else:
         assert app.info[0].value == "No hero statistics available yet."
         assert not app.metric

@@ -25,6 +25,9 @@ def dashboard_app(dashboard_database, warehouse_config, scoreboard_cursor, monke
     monkeypatch.setattr(dashboard_database, "load_default_match_id", MagicMock(return_value=9000000001))
     monkeypatch.setattr(dashboard_database, "load_available_matches", MagicMock(return_value=[9000000001]))
     monkeypatch.setattr(dashboard_database, "load_hero_statistics", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_hero_performance", MagicMock(return_value=None))
+    monkeypatch.setattr(dashboard_database, "load_hero_matchups", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_team_advantage", MagicMock(return_value=[]))
     monkeypatch.setattr(dashboard_database, "load_scoreboard", MagicMock(return_value=(match, players)))
     monkeypatch.setattr(dashboard_database, "load_player_snapshots", MagicMock(return_value={
         player["slot"]: [
@@ -37,6 +40,19 @@ def dashboard_app(dashboard_database, warehouse_config, scoreboard_cursor, monke
              "total_damage": 300, "hits": 3, "share_of_team_damage": 0.5}],
         5: [{"target_slot": 0, "target_team": 2, "source": "dota_unknown",
              "total_damage": 100, "hits": 1, "share_of_team_damage": 0.5}],
+    }))
+    monkeypatch.setattr(dashboard_database, "load_player_inventory", MagicMock(return_value={
+        0: [dict(inventory_slot=slot, location=location, item_name=name, item_display_name=label)
+            for slot, location, name, label in [
+                (0, "main", "item_blink", "Blink Dagger"),
+                (5, "main", "item_desolator", "Desolator"),
+                (6, "backpack", "item_branches", "Iron Branch"),
+                (7, "backpack", "item_branches", "Iron Branch"),
+                (9, "stash", "item_unknown", "unknown"),
+                (15, "teleport", "item_tpscroll", "Town Portal Scroll"),
+                (16, "neutral", "item_faded_broach", "Faded Broach"),
+            ]],
+        5: [dict(inventory_slot=2, location="main", item_name="item_boots", item_display_name="Boots of Speed")],
     }))
     return testing.AppTest.from_file(str(APP_PATH))
 
@@ -53,7 +69,7 @@ def test_player_view_compares_players_and_returns_to_scoreboard(dashboard_app, d
     assert metrics["Kill participation"] == "66.7% · 2 of 3 team kills"
     assert len(app.get("plotly_chart")) == 3
     headings = [heading.value for heading in app.subheader]
-    assert "Final main inventory" in headings
+    assert "Final inventory" in headings
     assert "Purchase history" not in headings
     assert app.slider[0].label == "Progression time range (seconds)"
 
@@ -88,6 +104,46 @@ def test_player_view_compares_players_and_returns_to_scoreboard(dashboard_app, d
     assert app.title[0].value == "Match overview"
     assert "player_slot" not in app.query_params
     assert {metric.label for metric in app.metric} == {"Match ID", "Result", "Duration"}
+
+
+def test_final_inventory_keeps_slot_positions_and_comparison_owners(dashboard_app, dashboard_database):
+    app = dashboard_app
+    app.query_params.update(match_id="9000000001", player_slot="0")
+    app.run(timeout=15)
+    assert not app.exception
+    text = [item.value for item in app.text]
+    assert text[:7] == ["Anti-Mage · Radiant", "Blink Dagger", *["Not recorded"] * 4, "Desolator"]
+    assert text[7:10] == ["Iron Branch", "Iron Branch", "Not recorded"]
+    assert text[10:12] == ["Faded Broach", "Town Portal Scroll"]
+    assert app.expander[0].label == "Stash"
+    assert not app.expander[0].proto.expanded
+    assert text[12:] == ["unknown", *["Not recorded"] * 5]
+    assert dashboard_database.load_player_inventory.call_count == 1
+    assert dashboard_database.load_player_inventory.call_args.args[1:] == (9000000001, 0, None)
+    app.selectbox[0].select(5).run(timeout=15)
+    assert not app.exception
+    assert "Axe · Dire" in [item.value for item in app.text]
+    assert "Boots of Speed" in [item.value for item in app.text]
+    assert dashboard_database.load_player_inventory.call_args.args[1:] == (9000000001, 0, 5)
+
+
+def test_inventory_failure_and_missing_player_preserve_other_analysis(dashboard_app, dashboard_database):
+    app = dashboard_app
+    app.query_params.update(match_id="9000000001", player_slot="0")
+    dashboard_database.load_player_inventory.side_effect = dashboard_database.DashboardDatabaseError("missing mart")
+    app.run(timeout=15)
+    assert not app.exception
+    assert any("Final inventory could not" in warning.value for warning in app.warning)
+    assert any("Final inventory unavailable" in info.value for info in app.info)
+    assert len(app.get("plotly_chart")) == 3
+    dashboard_database.load_player_inventory.side_effect = None
+    dashboard_database.load_player_inventory.return_value = {0: None, 5: [dict(
+        inventory_slot=2, location="main", item_name="item_boots", item_display_name="Boots of Speed") ]}
+    app.selectbox[0].select(5).run(timeout=15)
+    assert not app.exception
+    assert any("Final inventory unavailable" in info.value for info in app.info)
+    assert "Boots of Speed" in [item.value for item in app.text]
+    assert not any(item.value == "Empty" for item in app.text)
 
 
 def test_app_reports_missing_configuration_before_querying(
