@@ -3,9 +3,12 @@ One-time seed: copy a run of real matches from the collector's Drive stockpile i
 (docs/cold-storage.md). Ingest stays API -> Garage; this only fills the archive that cold_restore
 releases from.
 
-Picks --count matches that the collector uploaded (status 'uploaded' in its SQLite state),
-consecutive in match_seq_num from --start-seq (default: just after the newest match already in the
-manifest, else the oldest upload), so their real end-time spacing is kept. Each match's start_time
+Picks --count matches that the collector uploaded (status 'uploaded' in its SQLite state), in
+match_seq_num order from --start-seq (default: just after the newest match already in the
+manifest, else the oldest upload). Valve numbers matches about in the order they end, so the gaps
+between their end times are real, but only between the matches the collector happened to sample
+and upload. Every match of one invocation shares a seed_run id in the manifest, and a restore never
+mixes seed runs. Matches skipped or failed are listed at the end. Each match's start_time
 and duration come from its saved Steam page (seq_{start}.json.gz, the page with the largest start at
 or below the match's seq); a match missing from its page is skipped with a warning. Replays are
 downloaded in batches with rclone, checked (one complete zstd frame holding a Dota 2 replay),
@@ -20,6 +23,7 @@ docker-compose.yml.
 
 import argparse
 import bisect
+import datetime as dt
 import gzip
 import json
 import logging
@@ -38,14 +42,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dota import cold  # noqa: E402
 from dota.config import BUCKET  # noqa: E402
+from dota.errors import PermanentError  # noqa: E402
 
 BATCH = 20  # replays per rclone download, about 750 MB of staging at a time
 PAGE = re.compile(r"seq_(\d+)\.json\.gz")
 
 log = logging.getLogger("seed_cold_store")
 
-
-# ---- pure helpers ----
 
 def parse_lsf(lines) -> dict[str, int | None]:
     """name -> size from `rclone lsf --format ps` output (name;size), or plain names."""
@@ -92,12 +95,10 @@ def page_times(page: dict) -> dict[int, dict]:
 
 def uploaded_rows(db: Path) -> list[dict]:
     with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
-        cur = conn.execute("SELECT match_id, match_seq_num, start_time, bytes FROM matches "
+        cur = conn.execute("SELECT match_id, match_seq_num FROM matches "
                            "WHERE status = 'uploaded' AND match_seq_num IS NOT NULL ORDER BY match_seq_num")
-        return [dict(zip(("match_id", "match_seq_num", "start_time", "bytes"), r)) for r in cur]
+        return [{"match_id": m, "match_seq_num": s} for m, s in cur]
 
-
-# ---- rclone ----
 
 def rclone_lsf(remote: str, folder: str) -> dict[str, int | None]:
     log.info("listing %s/%s (this takes a minute on Drive)", remote, folder)
@@ -120,22 +121,20 @@ def rclone_fetch(remote: str, paths: list[str], dest: Path) -> None:
         sys.exit(f"rclone copy failed: {r.stderr.strip()[-500:]}")
 
 
-# ---- selection ----
-
 def resolve(cands: list[dict], count: int, replays: dict, starts: list[int], remote: str,
-            staging: Path) -> list[dict]:
+            staging: Path) -> tuple[list[dict], list[tuple[dict, str]]]:
     """Walk the candidates in order until `count` have a replay on the remote and a Steam
-    start_time and duration, fetching only the pages needed."""
-    chosen, times, fetched, i = [], {}, set(), 0
+    start_time and duration, fetching only the pages needed. Returns (chosen, [(row, reason)])."""
+    chosen, skipped, times, fetched, i = [], [], {}, set(), 0
     while len(chosen) < count and i < len(cands):
         chunk = cands[i:i + count - len(chosen)]
         i += len(chunk)
         usable = []
         for r in chunk:
             if f"{r['match_id']}.dem.zst" not in replays:
-                log.warning("skip %s: no replay on the remote", r["match_id"])
+                skipped.append((r, "no replay on the remote"))
             elif (start := page_for(r["match_seq_num"], starts)) is None:
-                log.warning("skip %s: no Steam page at or below seq %s", r["match_id"], r["match_seq_num"])
+                skipped.append((r, "no Steam page at or below its seq"))
             else:
                 usable.append((r, start))
         need = sorted({start for _, start in usable} - fetched)
@@ -150,13 +149,15 @@ def resolve(cands: list[dict], count: int, replays: dict, starts: list[int], rem
         for r, start in usable:
             t = times.get(r["match_id"])
             if not t or not t["start_time"] or not t["duration"] or t["duration"] <= 0:
-                log.warning("skip %s: not in Steam page seq_%s with a duration", r["match_id"], start)
+                skipped.append((r, f"not in Steam page seq_{start} with a duration"))
                 continue
             chosen.append({"match_id": r["match_id"], "match_seq_num": r["match_seq_num"],
                            "start_time": t["start_time"], "duration": t["duration"],
                            "end_time": t["start_time"] + t["duration"],
                            "remote_bytes": replays[f"{r['match_id']}.dem.zst"]})
-    return chosen
+    for r, reason in skipped:
+        log.warning("skip %s (seq %s): %s", r["match_id"], r["match_seq_num"], reason)
+    return chosen, skipped
 
 
 def print_selection(chosen: list[dict]) -> None:
@@ -172,11 +173,10 @@ def print_selection(chosen: list[dict]) -> None:
     print(f"{len(chosen)} matches, {total / 1e9:.2f} GB compressed")
 
 
-# ---- main ----
-
-def seed(chosen: list[dict], client, bucket: str, prefix: str, remote: str, staging: Path) -> int:
-    """Download, check, upload and record each chosen match. Returns how many failed."""
-    failed = 0
+def seed(chosen: list[dict], client, bucket: str, prefix: str, remote: str, staging: Path,
+         seed_run: str) -> list[dict]:
+    """Download, check, upload and record each chosen match. Returns the ones that failed."""
+    failed = []
     for b in range(0, len(chosen), BATCH):
         batch = chosen[b:b + BATCH]
         rclone_fetch(remote, [f"replays/{c['match_id']}.dem.zst" for c in batch], staging)
@@ -192,12 +192,12 @@ def seed(chosen: list[dict], client, bucket: str, prefix: str, remote: str, stag
                     client.put_object(Bucket=bucket, Key=cold.cold_key(prefix, c["match_id"]), Body=f)
             except Exception as e:  # noqa: BLE001
                 log.error("match %s not seeded: %s: %s", c["match_id"], type(e).__name__, e)
-                failed += 1
+                failed.append(c)
                 continue
             finally:
                 path.unlink(missing_ok=True)
             entries.append(cold.manifest_entry(c["match_id"], c["match_seq_num"], c["start_time"],
-                                               c["duration"], n_in, sha256))
+                                               c["duration"], n_in, sha256, seed_run))
             log.info("seeded %s (%.1f MB, %.1f MB as .dem)", c["match_id"], n_in / 1e6, n_out / 1e6)
         if entries:
             merged = cold.add_to_manifest(client, bucket, prefix, entries)
@@ -225,7 +225,10 @@ def main(argv=None) -> int:
                     help="print the selection and sizes; fetches the small Steam pages but no replays and writes nothing")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    prefix = cold.norm_prefix(args.prefix)
+    try:
+        prefix = cold.check_prefix(args.bucket, args.prefix, BUCKET)
+    except PermanentError as e:
+        sys.exit(str(e))
 
     os.environ.setdefault("S3_ENDPOINT", "http://127.0.0.1:3900")
     if not args.dry_run and not (os.environ.get("S3_ACCESS_KEY") and os.environ.get("S3_SECRET_KEY")):
@@ -259,14 +262,21 @@ def main(argv=None) -> int:
     # always a fresh folder of our own, so removing it never touches anything else
     staging = Path(tempfile.mkdtemp(prefix="cold-seed-", dir=args.staging))
     try:
-        chosen = resolve(cands, args.count, replays, starts, args.remote, staging)
+        chosen, skipped = resolve(cands, args.count, replays, starts, args.remote, staging)
         print_selection(chosen)
         if len(chosen) < args.count:
             log.warning("only %d of %d matches usable", len(chosen), args.count)
         if args.dry_run or not chosen:
             return 0
-        failed = seed(chosen, client, args.bucket, prefix, args.remote, staging)
-        print(f"seeded {len(chosen) - failed} of {len(chosen)} into s3://{args.bucket}/{prefix}")
+        seed_run = "seed-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        failed = seed(chosen, client, args.bucket, prefix, args.remote, staging, seed_run)
+        print(f"seeded {len(chosen) - len(failed)} of {len(chosen)} into s3://{args.bucket}/{prefix} "
+              f"as {seed_run}")
+        # later default runs start after the newest seeded seq, so these stay out unless asked for
+        holes = sorted([(r["match_seq_num"], r["match_id"], reason) for r, reason in skipped]
+                       + [(c["match_seq_num"], c["match_id"], "failed") for c in failed])
+        for seq, match_id, reason in holes:
+            print(f"  not seeded: {match_id} (seq {seq}): {reason}")
         return 1 if failed else 0
     finally:
         if args.keep_staging:

@@ -58,7 +58,7 @@ def test_uploaded_rows_reads_only_uploaded_matches(tmp_path):
                      "start_time INTEGER, status TEXT NOT NULL, bytes INTEGER, updated REAL NOT NULL)")
         conn.executemany("INSERT INTO matches VALUES (?, ?, ?, ?, ?, 0)",
                          [(1, 30, 0, "uploaded", 5), (2, 10, 0, "uploaded", 6), (3, 20, 0, "failed", None)])
-    assert [r["match_id"] for r in seed.uploaded_rows(db)] == [2, 1]
+    assert seed.uploaded_rows(db) == [{"match_id": 2, "match_seq_num": 10}, {"match_id": 1, "match_seq_num": 30}]
 
 
 class FakeRemote:
@@ -87,17 +87,22 @@ def test_resolve_skips_matches_without_a_replay_or_a_duration_and_fills_up(tmp_p
     monkeypatch.setattr(seed, "rclone_fetch", remote.fetch)
     cands = [{"match_id": m, "match_seq_num": s} for m, s in [(1, 100), (2, 101), (3, 102), (4, 200), (5, 201), (6, 202)]]
     replays = {f"{m}.dem.zst": 10 * m for m in (1, 2, 3, 4, 5)}  # 6 has no replay
-    chosen = seed.resolve(cands, 3, replays, [100, 200], "remote:", tmp_path)
+    chosen, skipped = seed.resolve(cands, 3, replays, [100, 200], "remote:", tmp_path)
     assert [c["match_id"] for c in chosen] == [1, 3, 5]
     assert chosen[0] == {"match_id": 1, "match_seq_num": 100, "start_time": 1000, "duration": 2000,
                          "end_time": 3000, "remote_bytes": 10}
     assert remote.fetches == [["steam/seq_100.json.gz"], ["steam/seq_200.json.gz"]]  # each page once
-    assert "skip 2" in caplog.text and "skip 4" in caplog.text
+    assert [(r["match_id"], reason) for r, reason in skipped] == [
+        (2, "not in Steam page seq_100 with a duration"), (4, "not in Steam page seq_200 with a duration")]
+    assert "skip 2 (seq 101)" in caplog.text
     assert list(tmp_path.rglob("*.gz")) == []
 
 
+COLD = "archive"
+
+
 def test_seed_uploads_checked_replays_unchanged_and_merges_the_manifest(tmp_path, monkeypatch):
-    from test_cold import COLD, FakeS3
+    from s3_fakes import FakeS3
 
     good = zstandard.ZstdCompressor().compress(DEM_MAGIC + b"x" * 10_000)
     bad = zstandard.ZstdCompressor().compress(b"<html></html>")
@@ -109,10 +114,11 @@ def test_seed_uploads_checked_replays_unchanged_and_merges_the_manifest(tmp_path
 
     chosen = [{"match_id": m, "match_seq_num": m, "start_time": 100, "duration": 50, "end_time": 150}
               for m in (1, 2)]
-    assert seed.seed(chosen, s3, COLD, "cold/", "remote:", tmp_path) == 1
+    assert seed.seed(chosen, s3, COLD, "cold/", "remote:", tmp_path, "seed-1") == [chosen[1]]
     assert s3.objects[(COLD, "cold/replays/1.dem.zst")] == good
     assert (COLD, "cold/replays/2.dem.zst") not in s3.objects
     manifest = cold.parse_manifest(s3.objects[(COLD, "cold/manifest.jsonl")].decode())
     assert [e["match_id"] for e in manifest] == [9, 1]
     assert manifest[1]["bytes"] == len(good) and manifest[1]["end_time"] == 150
+    assert manifest[1]["seed_run"] == "seed-1" and manifest[0]["seed_run"] is None
     assert list(tmp_path.rglob("*.zst")) == []  # staging emptied as it goes
