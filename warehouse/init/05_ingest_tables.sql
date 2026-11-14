@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS ingest.bookmarks (
     match_seq_num BIGINT    NOT NULL,
     recorded_at   TIMESTAMP NOT NULL
 );
+-- download_mode=window only: the next seq to read in the day's window (null = not started). Added
+-- with ALTER so a table created before this column gains it when the file reruns.
+ALTER TABLE ingest.bookmarks ADD COLUMN IF NOT EXISTS cursor_seq BIGINT;
 
 -- Matches whose replay could not be downloaded yet (OpenDota has no replay_url, or rate-limited).
 -- download_pending retries a row once next_try_at has passed; done_at or gave_up_at ends it.

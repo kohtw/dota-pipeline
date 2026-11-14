@@ -170,3 +170,34 @@ def test_spread_sleeps_2s_between_pages_only(monkeypatch):
     slept = []
     assert steam.ranked_all_pick_spread(0, 300, 3, sleep=slept.append) == []
     assert slept == [2.0, 2.0]
+
+
+def test_between_reads_forward_and_stops_after_the_nth_match(monkeypatch):
+    fake, calls = pages({"matches": [match(1), match(2, mode=23)]}, {"matches": [match(3), match(4), match(5)]})
+    monkeypatch.setattr(steam, "call", fake)
+    saved = []
+    ids, next_seq = steam.ranked_all_pick_between(1, 100, 2, lambda s, r: saved.append(s), sleep=lambda _: None)
+    assert (ids, next_seq) == ([10, 30], 4)  # the next call starts at match 4, which this one did not take
+    assert [c["start_at_match_seq_num"] for c in calls] == saved == [1, 3]
+
+
+def test_between_stops_at_the_window_end(monkeypatch):
+    fake, calls = pages({"matches": [match(8), match(9), match(10)]})
+    monkeypatch.setattr(steam, "call", fake)
+    assert steam.ranked_all_pick_between(8, 10, 50, sleep=lambda _: None) == ([80, 90], 10)
+    assert len(calls) == 1
+
+
+def test_between_reads_nothing_once_the_window_is_done(monkeypatch):
+    fake, calls = pages()
+    monkeypatch.setattr(steam, "call", fake)
+    assert steam.ranked_all_pick_between(10, 10, 50) == ([], 10)
+    assert calls == []
+
+
+def test_between_sleeps_2s_between_pages_only(monkeypatch):
+    fake, _ = pages(*[{"matches": [match(i, mode=23)]} for i in range(1, 4)])
+    monkeypatch.setattr(steam, "call", fake)
+    slept = []
+    steam.ranked_all_pick_between(1, 4, 50, sleep=slept.append)
+    assert slept == [2.0, 2.0]
