@@ -11,3 +11,5 @@ models:
   dota:
     marts:
       +materialized: table
+    staging:
+      +materialized: view     # no +schema: lands in the target schema, like the seeds

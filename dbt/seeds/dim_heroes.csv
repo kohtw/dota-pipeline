@@ -1,0 +1,128 @@
+hero_id,npc_name,localized_name,primary_attr,roles
+1,npc_dota_hero_antimage,Anti-Mage,agi,Carry|Escape|Nuker
+2,npc_dota_hero_axe,Axe,str,Durable|Initiator|Disabler|Carry
+3,npc_dota_hero_bane,Bane,all,Disabler|Support|Nuker|Durable
+4,npc_dota_hero_bloodseeker,Bloodseeker,agi,Carry|Nuker|Disabler|Initiator
+5,npc_dota_hero_crystal_maiden,Crystal Maiden,int,Support|Nuker|Disabler
+6,npc_dota_hero_drow_ranger,Drow Ranger,agi,Carry|Disabler|Pusher
+7,npc_dota_hero_earthshaker,Earthshaker,str,Initiator|Disabler|Support|Nuker
+8,npc_dota_hero_juggernaut,Juggernaut,agi,Carry|Escape|Pusher
+9,npc_dota_hero_mirana,Mirana,agi,Escape|Carry|Support|Nuker|Disabler
+10,npc_dota_hero_morphling,Morphling,agi,Carry|Escape|Durable|Nuker|Disabler
+11,npc_dota_hero_nevermore,Shadow Fiend,agi,Nuker|Carry
+12,npc_dota_hero_phantom_lancer,Phantom Lancer,agi,Carry|Escape|Nuker|Pusher
+13,npc_dota_hero_puck,Puck,int,Disabler|Escape|Initiator|Nuker
+14,npc_dota_hero_pudge,Pudge,str,Disabler|Durable|Initiator|Nuker
+15,npc_dota_hero_razor,Razor,agi,Carry|Durable|Nuker|Pusher
+16,npc_dota_hero_sand_king,Sand King,all,Initiator|Nuker|Disabler|Escape|Support
+17,npc_dota_hero_storm_spirit,Storm Spirit,int,Escape|Carry|Nuker|Disabler|Initiator
+18,npc_dota_hero_sven,Sven,str,Carry|Disabler|Durable|Initiator|Nuker
+19,npc_dota_hero_tiny,Tiny,str,Carry|Nuker|Durable|Pusher|Initiator|Disabler
+20,npc_dota_hero_vengefulspirit,Vengeful Spirit,agi,Support|Disabler|Initiator|Nuker|Escape
+21,npc_dota_hero_windrunner,Windranger,all,Carry|Support|Nuker|Disabler|Escape
+22,npc_dota_hero_zuus,Zeus,int,Nuker|Carry
+23,npc_dota_hero_kunkka,Kunkka,str,Carry|Disabler|Initiator|Support|Nuker|Durable
+25,npc_dota_hero_lina,Lina,int,Nuker|Carry|Support|Disabler
+26,npc_dota_hero_lion,Lion,int,Nuker|Disabler|Support|Initiator
+27,npc_dota_hero_shadow_shaman,Shadow Shaman,int,Disabler|Pusher|Support|Nuker|Initiator
+28,npc_dota_hero_slardar,Slardar,str,Carry|Durable|Initiator|Disabler|Escape
+29,npc_dota_hero_tidehunter,Tidehunter,str,Durable|Initiator|Disabler|Carry|Nuker
+30,npc_dota_hero_witch_doctor,Witch Doctor,int,Support|Nuker|Disabler
+31,npc_dota_hero_lich,Lich,int,Support|Nuker
+32,npc_dota_hero_riki,Riki,agi,Carry|Escape|Disabler
+33,npc_dota_hero_enigma,Enigma,all,Disabler|Pusher|Initiator
+34,npc_dota_hero_tinker,Tinker,int,Nuker|Pusher|Carry
+35,npc_dota_hero_sniper,Sniper,agi,Carry|Nuker
+36,npc_dota_hero_necrolyte,Necrophos,int,Nuker|Carry|Disabler|Durable
+37,npc_dota_hero_warlock,Warlock,int,Initiator|Support|Disabler
+38,npc_dota_hero_beastmaster,Beastmaster,all,Disabler|Durable|Initiator|Nuker
+39,npc_dota_hero_queenofpain,Queen of Pain,int,Nuker|Escape|Carry
+40,npc_dota_hero_venomancer,Venomancer,all,Support|Nuker|Disabler|Pusher|Initiator
+41,npc_dota_hero_faceless_void,Faceless Void,agi,Initiator|Carry|Disabler|Durable|Escape
+42,npc_dota_hero_skeleton_king,Wraith King,str,Durable|Carry|Disabler|Support|Initiator
+43,npc_dota_hero_death_prophet,Death Prophet,all,Pusher|Carry|Nuker|Disabler
+44,npc_dota_hero_phantom_assassin,Phantom Assassin,agi,Carry|Escape
+45,npc_dota_hero_pugna,Pugna,int,Nuker|Pusher
+46,npc_dota_hero_templar_assassin,Templar Assassin,agi,Carry|Escape
+47,npc_dota_hero_viper,Viper,agi,Durable|Carry|Disabler|Initiator
+48,npc_dota_hero_luna,Luna,agi,Carry|Nuker|Pusher
+49,npc_dota_hero_dragon_knight,Dragon Knight,str,Pusher|Carry|Disabler|Durable|Nuker|Initiator
+50,npc_dota_hero_dazzle,Dazzle,all,Support|Nuker|Disabler
+51,npc_dota_hero_rattletrap,Clockwerk,str,Initiator|Disabler|Nuker|Durable
+52,npc_dota_hero_leshrac,Leshrac,int,Nuker|Pusher|Carry|Support|Disabler
+53,npc_dota_hero_furion,Nature's Prophet,all,Pusher|Carry|Nuker|Escape
+54,npc_dota_hero_life_stealer,Lifestealer,str,Carry|Durable|Disabler|Escape
+55,npc_dota_hero_dark_seer,Dark Seer,int,Disabler|Escape|Initiator
+56,npc_dota_hero_clinkz,Clinkz,agi,Escape|Carry|Pusher
+57,npc_dota_hero_omniknight,Omniknight,str,Support|Nuker|Durable
+58,npc_dota_hero_enchantress,Enchantress,int,Support|Pusher|Disabler|Durable
+59,npc_dota_hero_huskar,Huskar,str,Carry|Durable|Initiator
+60,npc_dota_hero_night_stalker,Night Stalker,str,Disabler|Durable|Initiator|Carry|Nuker
+61,npc_dota_hero_broodmother,Broodmother,agi,Escape|Pusher|Carry|Nuker
+62,npc_dota_hero_bounty_hunter,Bounty Hunter,agi,Escape|Nuker
+63,npc_dota_hero_weaver,Weaver,agi,Escape|Carry
+64,npc_dota_hero_jakiro,Jakiro,int,Nuker|Pusher|Support|Disabler
+65,npc_dota_hero_batrider,Batrider,all,Initiator|Disabler|Escape
+66,npc_dota_hero_chen,Chen,int,Support|Pusher
+67,npc_dota_hero_spectre,Spectre,agi,Carry|Durable|Escape
+68,npc_dota_hero_ancient_apparition,Ancient Apparition,int,Support|Nuker|Disabler
+69,npc_dota_hero_doom_bringer,Doom,str,Disabler|Durable|Initiator|Carry|Nuker
+70,npc_dota_hero_ursa,Ursa,agi,Carry|Disabler|Durable
+71,npc_dota_hero_spirit_breaker,Spirit Breaker,str,Disabler|Durable|Initiator|Carry|Escape
+72,npc_dota_hero_gyrocopter,Gyrocopter,agi,Carry|Nuker|Disabler
+73,npc_dota_hero_alchemist,Alchemist,str,Carry|Durable|Support|Nuker|Disabler|Initiator
+74,npc_dota_hero_invoker,Invoker,int,Nuker|Disabler|Carry|Escape|Pusher
+75,npc_dota_hero_silencer,Silencer,int,Disabler|Initiator|Carry|Support|Nuker
+76,npc_dota_hero_obsidian_destroyer,Outworld Destroyer,int,Carry|Nuker|Disabler
+77,npc_dota_hero_lycan,Lycan,str,Pusher|Carry|Durable|Escape
+78,npc_dota_hero_brewmaster,Brewmaster,all,Initiator|Disabler|Durable|Carry|Nuker
+79,npc_dota_hero_shadow_demon,Shadow Demon,int,Support|Disabler|Nuker|Initiator
+80,npc_dota_hero_lone_druid,Lone Druid,agi,Pusher|Carry|Durable
+81,npc_dota_hero_chaos_knight,Chaos Knight,str,Carry|Disabler|Durable|Pusher|Initiator
+82,npc_dota_hero_meepo,Meepo,agi,Carry|Nuker|Escape|Disabler|Pusher|Initiator
+83,npc_dota_hero_treant,Treant Protector,str,Support|Initiator|Disabler|Durable|Escape
+84,npc_dota_hero_ogre_magi,Ogre Magi,str,Support|Nuker|Disabler|Durable|Initiator
+85,npc_dota_hero_undying,Undying,str,Support|Durable|Nuker|Disabler
+86,npc_dota_hero_rubick,Rubick,int,Support|Nuker|Disabler
+87,npc_dota_hero_disruptor,Disruptor,int,Support|Disabler|Nuker|Initiator
+88,npc_dota_hero_nyx_assassin,Nyx Assassin,all,Nuker|Disabler|Initiator|Escape
+89,npc_dota_hero_naga_siren,Naga Siren,agi,Carry|Disabler|Pusher|Support|Escape|Initiator
+90,npc_dota_hero_keeper_of_the_light,Keeper of the Light,int,Support|Nuker|Disabler
+91,npc_dota_hero_wisp,Io,all,Support|Escape|Nuker
+92,npc_dota_hero_visage,Visage,all,Nuker|Support|Disabler|Durable|Pusher
+93,npc_dota_hero_slark,Slark,agi,Escape|Carry|Nuker|Disabler
+94,npc_dota_hero_medusa,Medusa,agi,Carry|Disabler|Durable
+95,npc_dota_hero_troll_warlord,Troll Warlord,agi,Carry|Pusher|Disabler|Durable
+96,npc_dota_hero_centaur,Centaur Warrunner,str,Durable|Initiator|Nuker|Disabler|Escape
+97,npc_dota_hero_magnataur,Magnus,all,Initiator|Disabler|Nuker|Escape
+98,npc_dota_hero_shredder,Timbersaw,str,Nuker|Durable|Escape
+99,npc_dota_hero_bristleback,Bristleback,str,Durable|Carry|Nuker|Initiator
+100,npc_dota_hero_tusk,Tusk,str,Disabler|Initiator|Nuker
+101,npc_dota_hero_skywrath_mage,Skywrath Mage,int,Nuker|Support|Disabler
+102,npc_dota_hero_abaddon,Abaddon,all,Support|Durable|Carry
+103,npc_dota_hero_elder_titan,Elder Titan,str,Initiator|Nuker|Disabler|Durable
+104,npc_dota_hero_legion_commander,Legion Commander,str,Disabler|Carry|Nuker|Durable|Initiator
+105,npc_dota_hero_techies,Techies,all,Nuker|Disabler
+106,npc_dota_hero_ember_spirit,Ember Spirit,agi,Escape|Carry|Nuker|Disabler|Initiator
+107,npc_dota_hero_earth_spirit,Earth Spirit,str,Nuker|Escape|Disabler|Durable|Initiator
+108,npc_dota_hero_abyssal_underlord,Underlord,str,Escape|Support|Nuker|Disabler|Durable
+109,npc_dota_hero_terrorblade,Terrorblade,agi,Carry|Pusher|Nuker
+110,npc_dota_hero_phoenix,Phoenix,str,Nuker|Support|Escape|Initiator|Disabler
+111,npc_dota_hero_oracle,Oracle,int,Support|Nuker|Disabler|Escape
+112,npc_dota_hero_winter_wyvern,Winter Wyvern,int,Support|Disabler|Nuker
+113,npc_dota_hero_arc_warden,Arc Warden,all,Carry|Escape|Nuker
+114,npc_dota_hero_monkey_king,Monkey King,agi,Carry|Escape|Disabler|Initiator
+119,npc_dota_hero_dark_willow,Dark Willow,int,Support|Nuker|Escape|Disabler
+120,npc_dota_hero_pangolier,Pangolier,all,Carry|Nuker|Escape|Initiator|Disabler|Durable
+121,npc_dota_hero_grimstroke,Grimstroke,int,Support|Nuker|Disabler|Escape
+123,npc_dota_hero_hoodwink,Hoodwink,agi,Support|Nuker|Escape|Disabler
+126,npc_dota_hero_void_spirit,Void Spirit,all,Escape|Carry|Nuker|Disabler
+128,npc_dota_hero_snapfire,Snapfire,all,Nuker|Support|Disabler|Escape
+129,npc_dota_hero_mars,Mars,str,Durable|Disabler|Initiator|Carry
+131,npc_dota_hero_ringmaster,Ringmaster,int,Support|Nuker|Escape|Disabler
+135,npc_dota_hero_dawnbreaker,Dawnbreaker,str,Durable|Carry
+136,npc_dota_hero_marci,Marci,all,Initiator|Carry|Support|Disabler|Escape
+137,npc_dota_hero_primal_beast,Primal Beast,str,Durable|Initiator|Disabler
+138,npc_dota_hero_muerta,Muerta,int,Carry|Nuker|Disabler
+145,npc_dota_hero_kez,Kez,agi,Carry|Escape|Disabler
+155,npc_dota_hero_largo,Largo,str,Support|Durable|Disabler

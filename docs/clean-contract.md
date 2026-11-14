@@ -27,92 +27,101 @@ The DDL is in [`warehouse/init/`](../warehouse/init/). This file documents it; k
 ## Tables
 
 ### `matches`
+
 **Grain:** one match. **Key:** `match_id`.
 
-| Column | Type | Built from |
-|---|---|---|
-| `match_id` | BIGINT | raw `match` |
-| `game_mode` | INTEGER | `match.game_mode` |
-| `winner_team` | INTEGER | `match.game_winner` |
-| `end_time` | BIGINT | `match.end_time` (Unix seconds) |
-| `game_start_tick` | INTEGER | first `gamerules` tick with state 5 |
-| `duration_s` | DOUBLE PRECISION | last `gamerules` row: `m_flGameEndTime - m_flGameStartTime` |
+| Column            | Type             | Built from                                                  |
+| ----------------- | ---------------- | ----------------------------------------------------------- |
+| `match_id`        | BIGINT           | raw `match`                                                 |
+| `game_mode`       | INTEGER          | `match.game_mode`                                           |
+| `winner_team`     | INTEGER          | `match.game_winner`                                         |
+| `end_time`        | BIGINT           | `match.end_time` (Unix seconds)                             |
+| `game_start_tick` | INTEGER          | first `gamerules` tick with state 5                         |
+| `duration_s`      | DOUBLE PRECISION | last `gamerules` row: `m_flGameEndTime - m_flGameStartTime` |
 
 ### `players`
+
 **Grain:** one player in one match. **Key:** `(match_id, player_slot)`.
 
-| Column | Type | Built from |
-|---|---|---|
-| `player_slot` | INTEGER | `players.slot` |
-| `team` | INTEGER | `players.game_team` |
-| `team_slot` | INTEGER | `player_slot % 5` |
-| `hero_name` | TEXT | `players.hero_name` (`npc_dota_hero_*`) |
-| `hero_id` | INTEGER | `player_resource.m_vecPlayerTeamData.m_nSelectedHeroID` (Valve's number; joins to Steam). NULL if absent |
+| Column        | Type    | Built from                                                                                               |
+| ------------- | ------- | -------------------------------------------------------------------------------------------------------- |
+| `player_slot` | INTEGER | `players.slot`                                                                                           |
+| `team`        | INTEGER | `players.game_team`                                                                                      |
+| `team_slot`   | INTEGER | `player_slot % 5`                                                                                        |
+| `hero_name`   | TEXT    | `players.hero_name` (`npc_dota_hero_*`)                                                                  |
+| `hero_id`     | INTEGER | `player_resource.m_vecPlayerTeamData.m_nSelectedHeroID` (Valve's number; joins to Steam). NULL if absent |
 
 ### `player_stats`
+
 **Grain:** one player at one second of one match. **Key:** `(match_id, player_slot, tick)`.
 
 Built from `player_resource` joined to `team_data` on `tick` and `(team, team_slot)`. In `team_data`, `class` gives the team (`CDOTA_DataRadiant` = 2, `CDOTA_DataDire` = 3) and `index` is `team_slot`. In `player_resource`, team is `m_vecPlayerData.m_iPlayerTeam` and `team_slot` is `m_vecPlayerTeamData.m_iTeamSlot`. Skip rows whose team is not 2 or 3.
 
-| Column | Type | Built from |
-|---|---|---|
-| `player_slot`, `tick` | INTEGER | as above |
-| `game_time_s` | DOUBLE PRECISION | game clock |
-| `level`, `kills`, `deaths`, `assists` | INTEGER | `player_resource` `m_iLevel`, `m_iKills`, `m_iDeaths`, `m_iAssists` |
-| `net_worth` | INTEGER | `m_iNetWorth` |
-| `unspent_gold` | INTEGER | `m_iReliableGold + m_iUnreliableGold` |
-| `total_earned_gold`, `total_earned_xp` | INTEGER | `m_iTotalEarnedGold`, `m_iTotalEarnedXP` |
-| `last_hits`, `denies` | INTEGER | `m_iLastHitCount`, `m_iDenyCount` |
-| `hero_damage`, `tower_damage`, `healing` | DOUBLE PRECISION | `m_flHeroDamage`, `m_flTowerDamage`, `m_fHealing` |
+| Column                                   | Type             | Built from                                                          |
+| ---------------------------------------- | ---------------- | ------------------------------------------------------------------- |
+| `player_slot`, `tick`                    | INTEGER          | as above                                                            |
+| `game_time_s`                            | DOUBLE PRECISION | game clock                                                          |
+| `level`, `kills`, `deaths`, `assists`    | INTEGER          | `player_resource` `m_iLevel`, `m_iKills`, `m_iDeaths`, `m_iAssists` |
+| `net_worth`                              | INTEGER          | `m_iNetWorth`                                                       |
+| `unspent_gold`                           | INTEGER          | `m_iReliableGold + m_iUnreliableGold`                               |
+| `total_earned_gold`, `total_earned_xp`   | INTEGER          | `m_iTotalEarnedGold`, `m_iTotalEarnedXP`                            |
+| `last_hits`, `denies`                    | INTEGER          | `m_iLastHitCount`, `m_iDenyCount`                                   |
+| `hero_damage`, `tower_damage`, `healing` | DOUBLE PRECISION | `m_flHeroDamage`, `m_flTowerDamage`, `m_fHealing`                   |
 
 ### `positions`
+
 **Grain:** one real hero at one second of one match. **Key:** `(match_id, player_slot, tick)`.
 
-| Column | Type | Built from |
-|---|---|---|
-| `player_slot` | INTEGER | `heroes.m_iPlayerID / 2` |
-| `tick`, `game_time_s` | INTEGER, DOUBLE PRECISION | as above |
-| `x`, `y` | DOUBLE PRECISION | world coordinates |
+| Column                | Type                      | Built from               |
+| --------------------- | ------------------------- | ------------------------ |
+| `player_slot`         | INTEGER                   | `heroes.m_iPlayerID / 2` |
+| `tick`, `game_time_s` | INTEGER, DOUBLE PRECISION | as above                 |
+| `x`, `y`              | DOUBLE PRECISION          | world coordinates        |
 
 If a player has two real hero entities at one tick (e.g. Meepo clones), keep the lowest `handle`.
 
 ### `damage_events`
+
 **Grain:** all damage from one attacker to one target by one source at one tick. **Key:** `(match_id, tick, attacker_name, target_name, inflictor_name)`.
 
 Only `DOTA_COMBATLOG_DAMAGE` rows where the attacker or the target is a real hero. Rows with the same key are summed.
 
-| Column | Type | Built from |
-|---|---|---|
-| `tick`, `game_time_s` | INTEGER, DOUBLE PRECISION | |
-| `attacker_name`, `target_name` | TEXT | `names.name` for `*_name_idx` |
-| `inflictor_name` | TEXT, not null | ability or item; NULL index (auto attack) becomes `dota_unknown` |
-| `attacker_slot`, `target_slot` | INTEGER, nullable | `player_slot` of the hero via `hero_name`; NULL for creeps and towers |
-| `damage` | INTEGER | sum of `value` |
-| `hits` | INTEGER | number of rows summed |
+| Column                         | Type                      | Built from                                                            |
+| ------------------------------ | ------------------------- | --------------------------------------------------------------------- |
+| `tick`, `game_time_s`          | INTEGER, DOUBLE PRECISION |                                                                       |
+| `attacker_name`, `target_name` | TEXT                      | `names.name` for `*_name_idx`                                         |
+| `inflictor_name`               | TEXT, not null            | ability or item; NULL index (auto attack) becomes `dota_unknown`      |
+| `attacker_slot`, `target_slot` | INTEGER, nullable         | `player_slot` of the hero via `hero_name`; NULL for creeps and towers |
+| `damage`                       | INTEGER                   | sum of `value`                                                        |
+| `hits`                         | INTEGER                   | number of rows summed                                                 |
 
 ### `deaths`
+
 **Grain:** one real hero death. **Key:** `(match_id, tick, victim_slot)`.
 
 From `DOTA_COMBATLOG_DEATH` rows whose target is a real hero.
 
-| Column | Type | Built from |
-|---|---|---|
-| `tick`, `game_time_s` | | |
-| `victim_slot` | INTEGER | target hero to slot |
-| `killer_slot` | INTEGER, nullable | attacker hero to slot; NULL if a creep or tower killed |
-| `killer_name` | TEXT | attacker name |
+| Column                | Type              | Built from                                             |
+| --------------------- | ----------------- | ------------------------------------------------------ |
+| `tick`, `game_time_s` |                   |                                                        |
+| `victim_slot`         | INTEGER           | target hero to slot                                    |
+| `killer_slot`         | INTEGER, nullable | attacker hero to slot; NULL if a creep or tower killed |
+| `killer_name`         | TEXT              | attacker name                                          |
 
 ### `death_assists`
+
 **Grain:** one player credited with an assist on one death. **Key:** `(match_id, tick, victim_slot, assist_slot)`.
 
 Split the `;`-separated `assist_players` string of the death row; each player ID divided by 2 is an `assist_slot`.
 
 ### `purchases`
+
 **Grain:** the items one player bought at one tick. **Key:** `(match_id, tick, player_slot, item_name)`.
 
 From `DOTA_COMBATLOG_PURCHASE` rows. `player_slot` is the target hero; `item_name` is `names.name` for `value`. `quantity` counts identical rows at the same tick.
 
 ### `final_inventory`
+
 **Grain:** one item slot of one player at the last snapshot. **Key:** `(match_id, player_slot, inventory_slot)`.
 
 Last `heroes` row per real hero. For each `m_hItems.NNNN` handle that is not `16777215`: `inventory_slot` is `NNNN` (0-5 inventory, 6-8 backpack, 9-14 stash, 15 teleport, 16 neutral); `item_name` comes from `item_entities.handle` then `entity_names.idx`. Empty slots have no row.
@@ -121,12 +130,12 @@ Last `heroes` row per real hero. For each `m_hItems.NNNN` handle that is not `16
 
 Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on its key.
 
-| Mart | Grain | Answers |
-|---|---|---|
-| `match_scoreboard` | one player in one match | final K/D/A, last hits, net worth, GPM, final items |
-| `player_timeseries` | one player at one second | net worth and XP over time |
-| `damage_by_pair` | attacker, target, source in a match | who damaged which enemy hero, and share of the team's enemy-hero damage (creeps, towers and friendly fire excluded) |
-| `kill_participation` | one player in one match | (kills + assists) / team kills. Team kills = every enemy hero death; denies are nobody's kill. Stays within 0-1 |
+| Mart                 | Grain                               | Answers                                             |
+| -------------------- | ----------------------------------- | --------------------------------------------------- |
+| `match_scoreboard`   | one player in one match             | final K/D/A, last hits, net worth, GPM, final items |
+| `player_timeseries`  | one player at one second            | net worth and XP over time                          |
+| `damage_by_pair`     | attacker, target, source in a match | who damaged whom, and share of team hero damage     |
+| `kill_participation` | one player in one match             | share of team kills the player took part in         |
 
 Later: `death_context`, `economy_gap`.
 

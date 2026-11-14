@@ -13,3 +13,10 @@ sources:
       - name: death_assists
       - name: purchases
       - name: final_inventory
+
+  # Steam match-summary rows loaded by dags/steam_summary_elt.py (DDL: warehouse/init/04_steam_tables.sql).
+  - name: stg
+    schema: stg
+    tables:
+      - name: steam_matches
+      - name: steam_players

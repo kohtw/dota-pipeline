@@ -38,3 +38,11 @@ models:
     columns:
       - name: player_key
         data_tests: [not_null, unique]
+
+  - name: hero_pick_win_rate
+    description: "One row per hero in ranked All Pick matches (lobby 7, mode 22, 15+ minutes, 10 humans, known winner): picks, wins, pick_rate = picks / ranked matches, win_rate = wins / picks. Heroes never picked do not appear."
+    columns:
+      - name: hero_id
+        data_tests: [not_null, unique]
+      - name: picks
+        data_tests: [not_null]

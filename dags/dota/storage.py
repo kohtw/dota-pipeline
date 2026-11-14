@@ -9,6 +9,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from dota.config import BUCKET
+from dota.errors import PermanentError, is_transient_status, redact
 
 
 def client():
@@ -36,6 +37,14 @@ def read(key: str) -> bytes:
     return client().get_object(Bucket=BUCKET, Key=key)["Body"].read()
 
 
+def put(key: str, body: bytes = b"") -> None:
+    client().put_object(Bucket=BUCKET, Key=key, Body=body)
+
+
+def delete_key(key: str) -> None:
+    client().delete_object(Bucket=BUCKET, Key=key)
+
+
 def list_keys(prefix: str) -> list[str]:
     keys = []
     for page in client().get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
@@ -47,7 +56,12 @@ def upload_replay(url: str, key: str) -> None:
     """Stream a Valve replay into the bucket, decompressing on the way (no local file).
     Valve serves zstd despite the .bz2 name. A multipart upload only appears when
     complete, so a failed run never leaves a partial object."""
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        with zstandard.ZstdDecompressor().stream_reader(r.raw) as dem:
-            client().upload_fileobj(dem, BUCKET, key)
+    try:
+        with requests.get(url, stream=True, timeout=60) as r:
+            if not r.ok:
+                problem = f"replay download for {key} failed: HTTP {r.status_code}"
+                raise RuntimeError(problem) if is_transient_status(r.status_code) else PermanentError(problem)
+            with zstandard.ZstdDecompressor().stream_reader(r.raw) as dem:
+                client().upload_fileobj(dem, BUCKET, key)
+    except requests.RequestException as e:
+        raise RuntimeError(redact(f"replay download for {key} failed: {e}")) from None
