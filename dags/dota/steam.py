@@ -70,6 +70,24 @@ def ranked_all_pick_from(seq: int, n: int, save_page: Callable[[int, dict], None
     return ids[:n]
 
 
+def ranked_all_pick_spread(start: int, end: int, n: int, save_page: Callable[[int, dict], None] | None = None,
+                           *, sleep: Callable[[float], None] = time.sleep, pace_s: float = 2.0) -> list[int]:
+    """Up to n ranked All Pick match ids with start <= match_seq_num < end: the first new one on each
+    of n pages read at evenly spaced seq nums, so the sample covers the whole window instead of its
+    first minutes. A page without one adds nothing. save_page is called as in ranked_all_pick_from."""
+    ids: list[int] = []
+    for i in range(n):
+        if i:
+            sleep(pace_s)
+        seq = start + (end - start) * i // n
+        page = call("GetMatchHistoryBySequenceNum", start_at_match_seq_num=seq, matches_requested=100)
+        if save_page:
+            save_page(seq, page)
+        ids += [m["match_id"] for m in page["matches"] if m["match_seq_num"] < end and m["match_id"] not in ids
+                and m["game_mode"] == ALL_PICK and m["lobby_type"] == RANKED][:1]
+    return ids
+
+
 def fetch_pages(start_seq: int, pages: int, save_page: Callable[[int, dict], None], *,
                 sleep: Callable[[float], None] = time.sleep, pace_s: float = 2.0) -> int:
     """Fetch up to `pages` contiguous pages of 100 matches from start_seq and save each. Stops at

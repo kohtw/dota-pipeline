@@ -175,3 +175,28 @@ def test_retry_after_never_shortens_a_429_wait_below_the_backoff(monkeypatch):
     slept = []
     steam.call("GetMatchHistory", sleep=slept.append, matches_requested=1)
     assert slept == [15]
+
+
+def test_spread_reads_evenly_spaced_pages_and_takes_one_match_from_each(monkeypatch):
+    fake, calls = pages(*[{"matches": [match(s, mode=23), match(s + 1), match(s + 2)]} for s in (0, 250, 500, 750)])
+    monkeypatch.setattr(steam, "call", fake)
+    saved = []
+    ids = steam.ranked_all_pick_spread(0, 1000, 4, lambda s, r: saved.append(s), sleep=lambda _: None)
+    assert [c["start_at_match_seq_num"] for c in calls] == [0, 250, 500, 750]
+    assert saved == [0, 250, 500, 750]
+    assert ids == [10, 2510, 5010, 7510]
+
+
+def test_spread_skips_matches_past_the_window_and_ones_already_taken(monkeypatch):
+    fake, _ = pages({"matches": [match(1), match(2)]}, {"matches": [match(1), match(2)]},
+                    {"matches": [match(9), match(10)]})
+    monkeypatch.setattr(steam, "call", fake)
+    assert steam.ranked_all_pick_spread(0, 10, 3, sleep=lambda _: None) == [10, 20, 90]
+
+
+def test_spread_sleeps_2s_between_pages_only(monkeypatch):
+    fake, _ = pages(*[{"matches": []}] * 3)
+    monkeypatch.setattr(steam, "call", fake)
+    slept = []
+    assert steam.ranked_all_pick_spread(0, 300, 3, sleep=slept.append) == []
+    assert slept == [2.0, 2.0]
