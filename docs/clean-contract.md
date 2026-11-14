@@ -133,12 +133,27 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 | Mart                 | Grain                               | Answers                                             |
 | -------------------- | ----------------------------------- | --------------------------------------------------- |
 | `match_scoreboard`   | one player in one match             | final K/D/A, last hits, net worth, GPM, final items |
+| `match_inventory`    | one occupied item slot of one player in one match | final item identity, display name and inventory location |
 | `player_timeseries`  | one player at one second            | net worth and XP over time                          |
 | `damage_by_pair`     | attacker, target, source in a match | who damaged whom, and share of team hero damage     |
 | `kill_participation` | one player in one match             | share of team kills the player took part in         |
 | `hero_performance_summary` | one hero in qualifying Steam matches | average combat, economy and contribution metrics with observation counts |
 | `hero_matchup_summary` | one ordered hero/opponent pair in qualifying Steam matches | whole-match results against each enemy hero and overall win-rate context |
 | `team_advantage_timeline` | one replay match at each ten-second observation time | Radiant versus Dire net worth, complete-team coverage and two-minute economic swings |
+
+### `match_inventory`
+
+**Grain:** one occupied slot of one player at the final recorded hero snapshot.
+**Key:** `(match_id, player_slot, inventory_slot)`, exposed as `inventory_key`.
+
+Reads `clean.final_inventory` and left joins `dim_items.name = item_name`. Keeps the original
+`item_name` and supplies `item_display_name` from Valve's nonblank localized name. Unknown items
+and unnamed recipes use their internal name with `item_` removed and underscores replaced by spaces.
+
+`location` groups slots as `main` (0-5), `backpack` (6-8), `stash` (9-14), `teleport` (15),
+and `neutral` (16). Exact slot numbers and duplicate items remain separate rows. Empty source
+slots have no row; this mart does not synthesize empty slots or establish inventory coverage.
+It does not change the main-inventory fields in `match_scoreboard`.
 
 ### `team_advantage_timeline`
 

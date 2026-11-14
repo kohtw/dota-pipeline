@@ -14,6 +14,7 @@ from dashboard_db import (
     load_hero_performance,
     load_hero_matchups,
     load_player_damage,
+    load_player_inventory,
     load_player_snapshots,
     load_scoreboard,
     load_team_advantage,
@@ -200,6 +201,12 @@ def render_match_analysis(config: WarehouseConfig) -> None:
         except DashboardDatabaseError as error:
             st.error(str(error))
 
+        inventory_by_slot = None
+        try:
+            inventory_by_slot = load_player_inventory(config, requested_match, requested_slot, other_slot)
+        except DashboardDatabaseError:
+            st.warning("Final inventory could not be loaded. Other player analysis remains available.")
+
         render_player_page(
             match,
             selected_player,
@@ -209,13 +216,13 @@ def render_match_analysis(config: WarehouseConfig) -> None:
             damage_by_slot=damage_by_slot,
             roster=players,
             team_advantage=_load_team_advantage(config, requested_match),
+            inventory_by_slot=inventory_by_slot,
         )
         return
 
     # Missing optional statistics are formatted by the components rather than
     # rejected here, allowing incomplete records to remain visible and honest.
     render_match_header(match)
-    render_team_advantage(_load_team_advantage(config, requested_match), requested_match)
     st.caption("Select a hero to open their individual match analysis.")
     st.divider()
 
@@ -225,6 +232,8 @@ def render_match_analysis(config: WarehouseConfig) -> None:
     dire_players = [player for player in players if player["team"] == 3]
     render_team_scoreboard("Radiant", radiant_players)
     render_team_scoreboard("Dire", dire_players)
+    st.divider()
+    render_team_advantage(_load_team_advantage(config, requested_match), requested_match)
 
 
 def _load_team_advantage(config: WarehouseConfig, match_id: int) -> list[dict] | None:

@@ -12,8 +12,7 @@ from postgres_connection import DashboardDatabaseError
 def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> None:
     st.subheader("Results against enemy heroes")
     st.caption(
-        "Steam match summaries: how often this hero's team won when an enemy hero was present. "
-        "These are whole-match outcomes, not lane results or direct combat."
+        "How often this hero's team won matches against each enemy hero."
     )
     try:
         matchups = loader(hero["hero_id"])
@@ -39,23 +38,21 @@ def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> Non
     visible = [row for row in matchups if row["matches"] >= minimum
                and search in f"{labels[row['opponent_hero_id']]} {row['opponent_hero_id']}".casefold()]
     visible.sort(key=lambda row: (-row["matches"], row["opponent_hero_id"]))
-    st.caption(
-        "Most-observed opponents appear first. Small samples can give unstable rates; "
-        "a minimum-match filter does not guarantee reliable results. "
-        "Other players, skill, roles and game version can affect outcomes."
-    )
     if not visible:
         st.info("No opponents meet these filters. Clear the search or lower Minimum matchup matches.")
         return
+    st.caption(
+        "Difference (pp) = matchup win rate minus the hero's overall win rate shown above. "
+        "For example, 55% against an opponent versus 50% overall is +5 pp. "
+        "Opponents with the most matches appear first."
+    )
     st.dataframe(
         [{"Opponent": labels[row["opponent_hero_id"]], "Matches": row["matches"],
           "Wins": row["wins"], "Losses": row["losses"], "Matchup win rate": 100 * row["win_rate"],
-          "Overall hero win rate": 100 * row["overall_win_rate"],
           "Difference (pp)": row["win_rate_difference_pp"]} for row in visible],
         hide_index=True, width="stretch", key="hero_matchups_table",
         column_config={
             "Matchup win rate": st.column_config.NumberColumn(format="%.1f%%"),
-            "Overall hero win rate": st.column_config.NumberColumn(format="%.1f%%"),
             "Difference (pp)": st.column_config.NumberColumn(format="%+.1f pp"),
         },
     )
@@ -69,16 +66,10 @@ def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> Non
         row = next(row for row in visible if row["opponent_hero_id"] == selected)
         st.markdown("**Selected matchup**")
         st.text(f"{hero['hero_label']} against {labels[selected]}")
-        for column, (label, value) in zip(st.columns(4), (
+        for column, (label, value) in zip(st.columns(3), (
             ("Matchup matches", format_number(row["matches"])),
             ("Matchup win rate", format_percentage(row["win_rate"])),
-            ("Overall hero win rate", format_percentage(row["overall_win_rate"])),
             ("Difference (pp)", f"{row['win_rate_difference_pp']:+.1f} pp"),
         )):
             column.metric(label, value)
         st.caption(f"{row['wins']:,} wins and {row['losses']:,} losses, from {hero['hero_label']}'s perspective.")
-    st.caption(
-        "Difference (pp) = matchup win rate minus this hero's overall win rate, in percentage points. "
-        "The overall rate includes this matchup. This difference does not prove an opponent causes wins or losses. "
-        "Matches overlap across opponents; do not add table counts to get distinct matches."
-    )

@@ -2,6 +2,7 @@
 
 from collections import Counter
 from html import escape
+from math import ceil
 
 import plotly.graph_objects as go
 
@@ -46,29 +47,51 @@ def build_progression_chart(
         # Sorting a copy leaves the loader's records in their original order.
         ordered = sorted(records, key=lambda sample: sample["game_time_s"])
         times = [sample["game_time_s"] for sample in ordered]
+        values = [sample.get(metric) for sample in ordered]
+        # Dense replay snapshots need a clean line, rather than overlapping dots.
+        # Keep isolated measurements visible even when both neighbours are missing.
+        marker_sizes = [
+            4 if len(ordered) <= 60 or (
+                value is not None
+                and (index == 0 or values[index - 1] is None)
+                and (index == len(values) - 1 or values[index + 1] is None)
+            ) else 0
+            for index, value in enumerate(values)
+        ]
         tick_times.update(times)
         figure.add_scatter(
-            x=times, y=[sample.get(metric) for sample in ordered],
+            x=times, y=values,
             customdata=[_clock_label(time) for time in times], name=escape(label),
             mode="lines+markers", connectgaps=False,
             line={"color": color, "dash": dash, "shape": "linear", "width": 2},
-            marker={"size": 6},
+            marker={"size": marker_sizes, "color": color, "line": {"width": 0}},
             hovertemplate=(escape(label) + "<br>Game time: %{customdata}"
                            + "<br>" + metric_labels[metric] + ": %{y:,.0f}<extra></extra>"),
         )
 
-    # Space out the clock labels and always label the last plotted observation.
+    # Use regular clock intervals instead of ticks tied to snapshot density.
     axis_times = sorted(tick_times)
-    stride = max(1, (len(axis_times) + 5) // 6)
-    ticks = axis_times[::stride]
-    if axis_times and ticks[-1] != axis_times[-1]:
-        ticks.append(axis_times[-1])
+    ticks = []
+    if axis_times:
+        span = axis_times[-1] - axis_times[0]
+        step = next((step for step in (1, 5, 10, 15, 30, 60, 120, 300, 600, 1200)
+                     if span / step <= 7), 1800)
+        ticks = list(range(ceil(axis_times[0] / step) * step, int(axis_times[-1]) + 1, step))
+        if not ticks:
+            ticks = [axis_times[0]]
     figure.update_layout(
         xaxis={"title": "Game time", "tickmode": "array",
-               "tickvals": ticks, "ticktext": [_clock_label(time) for time in ticks]},
-        yaxis={"title": metric_labels[metric], "tickformat": ",.0f", "rangemode": "tozero"},
-        margin={"l": 20, "r": 20, "t": 20, "b": 20},
-        height=340, showlegend=comparison_snapshots is not None,
+               "tickvals": ticks, "ticktext": [_clock_label(time) for time in ticks],
+               "showgrid": False, "zeroline": False,
+               "showspikes": True, "spikemode": "across", "spikesnap": "cursor",
+               "spikethickness": 1, "spikecolor": "rgba(148,163,184,0.4)"},
+        yaxis={"title": metric_labels[metric], "tickformat": ",.0f", "rangemode": "tozero",
+               "gridcolor": "rgba(148,163,184,0.16)", "zeroline": False, "nticks": 5},
+        margin={"l": 20, "r": 20, "t": 35, "b": 30},
+        height=320, showlegend=comparison_snapshots is not None,
+        hovermode="x unified", hoverlabel={"namelength": -1},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     return figure
 

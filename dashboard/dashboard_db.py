@@ -213,9 +213,9 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
         # The left join keeps every scoreboard player, with NULL KP when no row matches.
         cursor.execute(
             """
-            SELECT s.match_id, s.player_slot AS slot, s.hero_name AS hero, s.team,
+            SELECT s.match_id, s.player_slot AS slot, s.hero_name AS hero, s.hero_localized_name AS hero_label, s.team,
                    s.kills, s.deaths, s.assists, s.last_hits, s.denies, s.net_worth,
-                   s.unspent_gold AS gold, s.final_items, s.duration_s, s.won,
+                   s.unspent_gold AS gold, s.final_item_labels AS final_items, s.duration_s, s.won,
                    kp.kill_participation, CAST(kp.team_kills AS BIGINT) AS team_kills,
                    kp.kills_from_events + kp.assists_from_events AS kill_involvements
             FROM marts.match_scoreboard AS s
@@ -242,13 +242,15 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
             winning_teams.add(player["team"])
         elif won is False:
             losing_teams.add(player["team"])
-        player["hero_label"] = player["hero"].removeprefix("npc_dota_hero_").replace("_", " ").title()
+        label = player["hero_label"]
+        player["hero_label"] = (label.strip() if isinstance(label, str) and label.strip() else
+                                player["hero"].removeprefix("npc_dota_hero_").replace("_", " ").title())
         final_items = player.pop("final_items")
         player["main_inventory"] = None
         if final_items is not None:
             player["main_inventory"] = [
-                item.removeprefix("item_").replace("_", " ").title()
-                for item in final_items.split(",") if item
+                item.removeprefix("item_").replace("_", " ").title() if item.startswith("item_") else item
+                for item in final_items if item
             ]
         players.append(player)
 
@@ -263,6 +265,48 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
         "winner_team": winner,
     }
     return match, players
+
+
+def load_player_inventory(
+    config: WarehouseConfig, match_id: int, player_slot: int, comparison_slot: int | None = None,
+) -> dict[int, list[dict] | None]:
+    """Load occupied final slots; absent rows mean unknown coverage, not an empty inventory."""
+    inventory = {player_slot: None}
+    if comparison_slot is not None:
+        inventory[comparison_slot] = None
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT player_slot, inventory_slot, location, item_name, item_display_name
+            FROM marts.match_inventory
+            WHERE match_id = %s AND player_slot IN (%s, %s)
+            ORDER BY player_slot, inventory_slot
+            """,
+            (match_id, player_slot, comparison_slot),
+        )
+        rows = cursor.fetchall()
+
+    locations = ("main",) * 6 + ("backpack",) * 3 + ("stash",) * 6 + ("teleport", "neutral")
+    seen = set()
+    for slot, index, location, name, label in rows:
+        if (type(slot) is not int or slot not in inventory
+                or type(index) is not int or not 0 <= index <= 16
+                or location != locations[index]
+                or not isinstance(name, str) or not name.strip()
+                or not isinstance(label, str) or not label.strip()):
+            raise DashboardDatabaseError("The inventory mart contains invalid inventory records.")
+        if (slot, index) in seen:
+            raise DashboardDatabaseError("The inventory mart contains duplicate inventory slots.")
+        seen.add((slot, index))
+        if inventory[slot] is None:
+            inventory[slot] = []
+        inventory[slot].append({
+            "inventory_slot": index,
+            "location": location,
+            "item_name": name,
+            "item_display_name": label.strip(),
+        })
+    return inventory
 
 
 def load_player_snapshots(

@@ -32,7 +32,7 @@ def _render_hero_details(hero: dict) -> None:
     picks_column.metric("Picks", format_number(hero["picks"]))
     wins_column.metric("Wins", format_number(hero["wins"]))
     losses_column.metric("Losses", format_number(hero["losses"]))
-    st.caption("Rates are shown alongside their pick counts; small samples can give unstable win rates. — means unavailable.")
+    st.caption("— means unavailable.")
 
 
 def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]) -> None:
@@ -53,7 +53,6 @@ def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]
     st.caption(
         f"Full-match averages across {appearances:,} appearances. "
         f"Average match length: {profile['avg_match_duration_s'] / 60:.1f} minutes. "
-        "Each appearance has equal weight."
     )
     groups = (
         ("Combat", (("Kills", "avg_kills", "kills"), ("Deaths", "avg_deaths", "deaths"),
@@ -63,17 +62,22 @@ def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]
                           ("Hero healing / min", "avg_hero_healing_per_min", "hero_healing"),
                           ("Tower damage / min", "avg_tower_damage_per_min", "tower_damage"))),
     )
-    for title, metrics in groups:
-        st.markdown(f"**{title}**")
-        for column, (label, metric, coverage) in zip(st.columns(len(metrics)), metrics):
-            average = profile[metric]
-            column.metric(label, "—" if average is None else f"{average:,.1f}",
+    for column, (title, metrics) in zip(st.columns(3), groups):
+        with column.container(border=True, height="stretch"):
+            st.markdown(f"### {title}")
+            st.caption("Per match" if title == "Combat" else "Per minute")
+            for index, (label, metric, coverage) in enumerate(metrics):
+                if index:
+                    st.divider()
+                average = profile[metric]
+                st.metric(label, "—" if average is None else f"{average:,.1f}",
                           help="Average among appearances with this metric recorded. Missing values are excluded; recorded zeros count.")
-            column.caption(f"Recorded in {profile[coverage + '_observations']:,} of {appearances:,} appearances")
+                observed = profile[coverage + "_observations"]
+                if observed != appearances:
+                    st.caption(f"Recorded in {observed:,} of {appearances:,} appearances")
     st.caption(
-        "Per-minute contribution is calculated for each appearance before averaging. "
-        "These are observations from this sample, not performance targets or a hero-strength ranking. "
-        "Player skill, role and game version can affect comparisons."
+        "Each match has equal weight. Missing values are excluded; — means unavailable. "
+        "Metrics use all appearances above unless a smaller recorded count is shown."
     )
 
 
@@ -84,8 +88,7 @@ def render_hero_statistics(
     """Show dataset coverage, one hero's results and a sortable comparison table."""
     st.title("Hero statistics")
     st.caption(
-        "Collected ranked All Pick matches: at least 15 minutes, ten human players and a known result. "
-        "These statistics describe the collected sample."
+        "Ranked All Pick matches: at least 15 minutes, ten human players and a known result."
     )
     if not heroes:
         st.info("No hero statistics available yet.")

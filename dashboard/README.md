@@ -78,9 +78,17 @@ These existing links still open Match analysis. Explicit section links use `?vie
 Within Match analysis, select a hero to see the player page and use **Compare with** to add another player.
 The match header shows match ID, result and duration. Participants are identified by hero, team
 and slot; account names are not part of the dashboard's mart contract.
+Hero labels use Valve's `dim_heroes` display names across scoreboards, player pages, comparison
+selectors and charts. Unknown heroes fall back to a readable replay identifier.
 
-**Final main inventory** shows the main item slots at match end, including passive items. The
-**Progression time range** filters net worth and accumulated XP only. Final statistics, kill
+**Final inventory** on player pages shows six main slots in a 2×3 grid, three backpack slots,
+separate neutral and TP slots, and six stash slots in a collapsed expander. Comparison mode gives
+each player their own loadout. Labels come from `marts.match_inventory` and Valve's `dim_items`
+seed. Exact slot positions and duplicate items are preserved; unknown or unnamed items use readable
+fallback names. An absent slot says **Not recorded**, and a player without inventory rows shows
+an unavailable message. The scoreboard keeps its compact **Final main inventory** column.
+
+The **Progression time range** filters net worth and accumulated XP only. Final statistics, kill
 participation, inventory and full-match damage remain independent of that range.
 
 In **Hero damage dealt**, the summary lists each selected attacker, their total recorded damage to
@@ -138,7 +146,9 @@ read the current marts on each page run.
 
 ## Team advantage
 
-The match overview and player pages show **Team net-worth advantage** from
+The match overview shows the Radiant and Dire scoreboards before **Team net-worth advantage**.
+Player pages put team analysis at the bottom, after the player's statistics, inventory, damage
+and progression. Both pages read team advantage from
 `marts.team_advantage_timeline`. Positive values mean Radiant leads; negative values mean Dire
 leads. Zero means equal net worth. This fixed perspective also applies when viewing a Dire player.
 The metric describes economic position, not win probability or combat strength.
@@ -155,6 +165,9 @@ with incomplete endpoints do not display invented changes.
 On a player page, choose **Two-minute interval to review** and select **Review this interval**.
 The existing progression range updates to those endpoints for player net worth and XP. Team
 charts and final statistics, inventory, kill participation and full-match damage stay unchanged.
+Player progression charts keep every recorded measurement and missing-value gap, with fine lines
+and regular game-clock ticks. Dense series hide overlapping markers; sparse series and isolated
+measurements keep small markers. Hover details show exact recorded values for each player.
 If the team mart is missing or invalid, other match analysis remains available. Calculation rules
 and Postgres validation are in [the team advantage contract](../docs/team-advantage-contract.md).
 
@@ -201,8 +214,9 @@ The selected hero's **Performance profile** reads `marts.hero_performance_summar
 - **Combat** shows average final kills, deaths and assists.
 - **Economy** shows average Steam-reported gold and XP per minute.
 - **Contribution** shows average hero damage, hero healing and tower damage per minute.
-- Every metric shows how many appearances have a recorded value. Missing values display as
-  unavailable; recorded zeros remain zero and contribute to the average.
+- Combat, Economy and Contribution appear in separate bordered cards, with vertically stacked
+  metrics and dividers. Recorded counts appear when coverage is incomplete. Missing values display
+  as unavailable; recorded zeros remain zero and contribute to the average.
 - Per-minute contribution is calculated for each appearance before averaging, with equal weight
   per appearance. The profile also shows its appearance count and average match length.
 
@@ -219,9 +233,9 @@ and Postgres validation commands are in [the performance contract](../docs/hero-
 - Opponents start with the most-observed pairings. Search by opponent name or hero ID, or use
   **Minimum matchup matches** to hide smaller samples. Small samples can give unstable rates;
   the filter does not guarantee reliable results.
-- The sortable table shows matches, wins, losses, matchup win rate, overall hero win rate and
-  **Difference (pp)**. The difference is matchup rate minus overall rate in percentage points.
-  The overall rate includes the matchup being examined.
+- The sortable table shows matches, wins, losses, matchup win rate and **Difference (pp)**.
+  An explanation above the table defines the difference from the hero's overall win rate, already
+  displayed in the hero summary, and gives a numerical example.
 - **Inspect an opponent** opens a detail view from the selected hero's perspective. Opponent
   controls are scoped to that hero and leave the hero URL and **Minimum picks** unchanged.
 - These are whole-match team outcomes from Steam summaries, not lane results, direct combat
@@ -251,6 +265,17 @@ The app displays fixed database error messages rather than raw driver details. A
 optional damage query leaves the player's other statistics visible. A failed progression query
 stops the player page from showing incomplete charts. Invalid links provide a route back to an
 available scoreboard.
+
+## Final-slot inventory loader
+
+The final-slot inventory loader `load_player_inventory` reads `marts.match_inventory` for the
+selected match and player, with an optional comparison player, in one parameterized read-only query.
+It returns a mapping from player slot to records ordered by `inventory_slot`, each containing
+`inventory_slot`, `location`, `item_name` and `item_display_name`. Duplicate items in different
+slots stay separate. A player without records maps to `None`; omitted slots have unknown coverage
+and are not labelled empty. The current mart has no coverage flag to confirm an empty loadout.
+Duplicate slots, invalid slot/location combinations and missing names raise a database error.
+Player pages load inventory independently; a failed inventory query leaves other analysis available.
 
 ## Tests
 

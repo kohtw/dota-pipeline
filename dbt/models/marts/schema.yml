@@ -13,6 +13,38 @@ models:
         data_tests: [not_null]
       - name: gpm
         description: "total_earned_gold per minute of game time"
+      - name: final_items
+        description: "Original comma-separated item_* identifiers in main-slot order, including duplicates."
+      - name: hero_localized_name
+        description: "Valve display name from dim_heroes joined on npc_name. Nullable for unknown heroes; hero_name keeps the replay identifier."
+      - name: final_item_labels
+        description: "JSON array of Valve display names from dim_items, in main-slot order including duplicates. Unknown or unnamed items retain their internal name for the dashboard fallback. NULL when no main-inventory rows exist."
+
+  - name: match_inventory
+    description: "One occupied player item slot at the final recorded hero snapshot, from clean.final_inventory. Includes main inventory, backpack, stash, teleport and neutral slots. Empty slots have no row; missing source coverage is not represented as an empty loadout."
+    columns:
+      - name: inventory_key
+        description: "match_id-player_slot-inventory_slot; duplicate items in different slots remain separate rows."
+        data_tests: [not_null, unique]
+      - name: match_id
+        data_tests: [not_null]
+      - name: player_slot
+        data_tests: [not_null]
+      - name: inventory_slot
+        description: "Replay slot: 0-5 main, 6-8 backpack, 9-14 stash, 15 teleport, 16 neutral."
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], quote: false}}
+      - name: location
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: ["main", "backpack", "stash", "teleport", "neutral"]}}
+      - name: item_name
+        description: "Original replay item_* identifier, including items absent from dim_items."
+        data_tests: [not_null]
+      - name: item_display_name
+        description: "Valve localized name; unknown or unnamed items fall back to the internal name with its item_ prefix removed and underscores replaced by spaces."
+        data_tests: [not_null]
 
   - name: player_timeseries
     description: "One player at one second: net worth, unspent gold, XP and more over game time."

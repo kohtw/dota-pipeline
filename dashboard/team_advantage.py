@@ -22,7 +22,7 @@ def render_team_advantage(
         return
     st.caption(
         "Full match, Radiant minus Dire. Above zero: Radiant ahead. Below zero: Dire ahead. "
-        "Zero: equal net worth. This measures economic position, not win probability."
+        "Zero: equal net worth."
     )
     complete = sum(row["net_worth_advantage"] is not None for row in records)
     st.caption(f"Complete observations: {complete:,} of {len(records):,}. "
@@ -38,8 +38,8 @@ def render_team_advantage(
                 for row in records if row["net_worth_advantage"] is None
             ], hide_index=True, width="stretch")
     st.markdown("**Economic swings over two minutes**")
-    st.caption("Positive: moved toward Radiant. Negative: moved toward Dire. "
-               "Both teams can gain net worth while the advantage shifts. The change alone does not explain its cause.")
+    st.caption("Change in Radiant's net-worth advantage over the preceding two minutes. "
+               "Positive: moved toward Radiant. Negative: moved toward Dire.")
     changes = [row for row in records if row["net_worth_advantage_change_120s"] is not None]
     if not changes:
         st.caption("No complete two-minute intervals available. Both endpoints need full team coverage.")
@@ -62,4 +62,4 @@ def render_team_advantage(
     if selected is not None:
         st.button("Review this interval", key="apply_team_review_interval", on_click=_apply_interval,
                   args=(progression_key, selected - 120, selected))
-        st.caption("Applies to the player net-worth and XP range below. Team charts and final statistics stay unchanged.")
+        st.caption("Updates the player net-worth and XP charts above. Team charts and final statistics stay unchanged.")

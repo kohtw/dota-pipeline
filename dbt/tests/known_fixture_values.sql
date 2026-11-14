@@ -20,6 +20,18 @@ select 'slot0 final items should be item_blink,item_desolator'
 from {{ ref('match_scoreboard') }}
 where match_id = 9000000001 and player_slot = 0 and final_items != 'item_blink,item_desolator'
 union all
+select 'slot0 item labels should be Blink Dagger,Desolator in slot order'
+from {{ ref('match_scoreboard') }}
+where match_id = 9000000001 and player_slot = 0
+  and (final_item_labels is null or json_array_length(final_item_labels) != 2
+       or (final_item_labels ->> 0) != 'Blink Dagger'
+       or (final_item_labels ->> 1) != 'Desolator')
+union all
 select 'creep damage must not reach damage_by_pair'
 from {{ ref('damage_by_pair') }}
 where attacker_slot is null
+union all
+select 'slot0 hero display name should be Anti-Mage'
+from {{ ref('match_scoreboard') }}
+where match_id = 9000000001 and player_slot = 0
+  and (hero_localized_name is null or hero_localized_name != 'Anti-Mage')
