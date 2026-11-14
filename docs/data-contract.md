@@ -42,7 +42,7 @@ Writes are idempotent per match: re-parsing a match replaces only its `match_id=
 
 | Path | Written by | Content |
 |---|---|---|
-| `steam_raw/seq_{start_seq}.json.gz` | `steam_fetch` (hourly), `dota_daily_download` | One raw Steam match-history page: the API's `result` object, as gzipped JSON |
+| `steam_raw/seq_{start_seq}.json.gz` | `steam_fetch` (hourly) | One raw Steam match-history page: the API's `result` object, as gzipped JSON |
 | `steam_raw/_loaded/{page file name}` | `steam_summary_elt` | Empty marker, written after the page is loaded |
 | `parsed/_failed/match_id={id}/{run}` | `parse_pending` | Empty marker, one per sweep run in which the parser container crashed (non-zero exit other than 137). After 3, the sweep skips the match; deleting the prefix makes it eligible again |
 | `clean/_rejected/match_id={id}/_REJECTED` | `clean_pending` | Empty marker, written when the clean job rejects the match. Deleting it makes the match eligible again |

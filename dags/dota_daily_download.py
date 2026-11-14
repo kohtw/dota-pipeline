@@ -1,64 +1,62 @@
 """
-Daily at 00:00 SGT: download N_MATCHES ranked All Pick replays that ended around
-the previous 00:00 SGT into Garage (s3://raw/replays/{match_id}.dem).
+Pick a sample of yesterday's ranked All Pick matches and queue their replays for download_pending.
 
-Valve numbers matches in the order they END (match_seq_num). Each run saves the
-newest seq num as a bookmark; the next run lists matches from it, i.e. games that
-ended ~24h ago: every game length is included and replays are ready.
-The first run only saves the bookmark.
+Daily at 01:00 SGT, once the last hourly steam_fetch of the day has been loaded. Picks N_MATCHES
+ranked All Pick matches that ended yesterday (SGT) from stg.steam_matches, the matches steam_fetch
+pooled, spread evenly through the day; a rerun of a day picks the same matches. It reads no Steam
+API itself, so steam_fetch must be unpaused, or there is nothing to pick.
+
+The picks go into ingest.download_queue, due at once, and the DOWNLOADS_QUEUED asset wakes
+download_pending, which does the downloading. A match already queued is left as it is.
+
+To redo a past day, trigger with config {"day": "YYYY-MM-DD"}. Without one it works on yesterday.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from airflow.sdk import Variable, dag, task
+from airflow.sdk import Param, Variable, dag, get_current_context, task
+from airflow.sdk.exceptions import AirflowSkipException
 
 from dota.alerts import ALERT_CALLBACKS  # standard library only, cheap at parse time
-from dota.assets import STEAM_RAW
-from dota.config import API_RETRY
+from dota.assets import DOWNLOADS_QUEUED
+from dota.config import WAREHOUSE_INIT_DIR
 
-# dota.* (requests, boto3, ...) is imported inside tasks, not at parse time
-N_MATCHES = 20  # default replays per run
+# dota.* (psycopg2, ...) is imported inside tasks, not at parse time
+N_MATCHES = 50  # default replays per day
 MATCHES_VAR = "matches_per_run"  # Airflow Variable: overrides N_MATCHES (e.g. a small test run, or a bigger quota)
-BOOKMARK = "dota_seq_bookmark"  # Airflow Variable
-PAGES_VAR = "steam_pages_per_run"  # Airflow Variable: ceiling on Steam pages per run; the loop stops once it has N_MATCHES ids (usually ~2 pages)
 
 
 @dag(
-    schedule="0 16 * * *",  # 16:00 UTC = 00:00 SGT
+    schedule="0 17 * * *",  # 01:00 SGT
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
     catchup=False,
     max_active_runs=1,
+    params={"day": Param(None, type=["null", "string"], format="date",
+                         description="Day to pick from (YYYY-MM-DD); empty for yesterday")},
     default_args=ALERT_CALLBACKS,
 )
 def dota_daily_download():
-    # an hour fits 20 pages plus newest_seq even if every call times out twice before it succeeds
-    @task(pool="steam_api", execution_timeout=timedelta(hours=1), outlets=[STEAM_RAW], **API_RETRY)
-    def get_matches() -> list[int]:
-        from dota import steam, steam_summary, storage
+    @task(outlets=[DOWNLOADS_QUEUED])
+    def queue_matches() -> int:
+        from dota import ingest, warehouse
 
-        def save_page(start_seq: int, page: dict) -> None:
-            steam_summary.save_page(start_seq, page, storage.put)
+        context = get_current_context()
+        day = ingest.day_of(context["dag_run"].run_after, context["params"].get("day"))
+        n = int(Variable.get(MATCHES_VAR, default=N_MATCHES))
+        conn = warehouse.connect()
+        try:
+            warehouse.apply_init_sql(WAREHOUSE_INIT_DIR, conn)  # creates ingest.download_queue on an older volume
+            ids = ingest.sample(conn, day, n)
+            added = sum(ingest.enqueue(conn, match_id, day) for match_id in ids)
+        finally:
+            conn.close()
+        if not ids:
+            raise AirflowSkipException(f"no ranked All Pick matches for {day} in stg.steam_matches; "
+                                       "is steam_fetch unpaused?")
+        print(f"{day}: picked {len(ids)} of {n}; queued {added}, {len(ids) - added} were already queued")
+        return added
 
-        bookmark = Variable.get(BOOKMARK, default=None)
-        pages = int(Variable.get(PAGES_VAR, default=steam.MAX_PAGES))
-        n_matches = int(Variable.get(MATCHES_VAR, default=N_MATCHES))
-        ids = steam.ranked_all_pick_from(int(bookmark), n_matches, save_page, max_pages=pages) if bookmark else []
-        if bookmark and not ids:
-            raise RuntimeError(f"no ranked matches after seq {bookmark}")
-        Variable.set(BOOKMARK, str(steam.newest_seq()))
-        return ids
-
-    # retries cover OpenDota not having the replay salt yet
-    @task(pool="opendota_api", **API_RETRY)
-    def download_replay(match_id: int) -> str:
-        from dota import opendota, storage
-
-        key = f"replays/{match_id}.dem"
-        if not storage.exists(key):
-            storage.upload_replay(opendota.replay_url(match_id), key)
-        return key
-
-    download_replay.expand(match_id=get_matches())
+    queue_matches()
 
 
 dota_daily_download()

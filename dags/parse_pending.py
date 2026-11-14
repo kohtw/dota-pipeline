@@ -3,7 +3,7 @@ Hourly sweep: parse every replay in Garage that has no complete parsed output ye
 each match's output against docs/data-contract.md.
 
 It works from what is in Garage, not from which DAG put it there, so it picks up replays from
-dota_daily_download, a manual upload, or a bulk import alike. A replay is only skipped once its
+download_pending, a manual upload, or a bulk import alike. A replay is only skipped once its
 parsed/_complete marker exists (written after all tables), so re-running parses nothing twice and
 a half-finished parse runs again.
 A replay whose parser container crashed in 3 runs (a non-zero exit other than 137, counted by
