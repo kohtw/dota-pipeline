@@ -29,6 +29,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     # shared across containers so api-server and scheduler trust each other's tokens
     AIRFLOW__API_AUTH__JWT_SECRET: local-dev-jwt-secret
+    AIRFLOW__API__SECRET_KEY: local-dev-api-secret
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     <<: [*s3-creds, *warehouse-conn]
     S3_ENDPOINT: http://garage:3900
@@ -139,7 +140,7 @@ services:
 
   airflow-init:
     <<: *airflow-common
-    command: bash -c "airflow db migrate && airflow pools set spark 2 'Parser and Spark clean containers' && airflow pools set steam_api 1 'Steam Web API calls' && airflow pools set opendota_api 2 'OpenDota calls'"
+    command: bash -c "airflow db migrate && airflow pools set spark 2 'Parser and Spark clean containers' && airflow pools set steam_api 1 'Steam Web API calls' && airflow pools set opendota_api 1 'OpenDota calls'"
     restart: "no"
 
   airflow-apiserver:

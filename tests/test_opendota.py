@@ -14,6 +14,14 @@ class Resp:
         return self._body
 
 
+@pytest.fixture(autouse=True)
+def slept(monkeypatch):
+    """Records the pacing waits instead of sleeping."""
+    waits = []
+    monkeypatch.setattr(opendota.time, "sleep", waits.append)
+    return waits
+
+
 @pytest.fixture
 def fake_http(monkeypatch):
     posted = []
@@ -65,3 +73,10 @@ def test_connection_error_is_not_chained(fake_http):
     assert "SECRET123" not in str(err.value)
     assert err.value.__cause__ is None
     assert err.value.__suppress_context__
+
+
+def test_waits_after_every_call_to_stay_at_50_a_minute(fake_http, slept):
+    fake_http(Resp(404))
+    with pytest.raises(RuntimeError):
+        opendota.replay_url(1)
+    assert slept == [60 / 50] * 2  # the match lookup and the fetch request
