@@ -75,6 +75,10 @@ and slot; account names are not part of the dashboard's mart contract.
 **Progression time range** filters net worth and accumulated XP only. Final statistics, kill
 participation, inventory and full-match damage remain independent of that range.
 
+Kill participation uses credited kills plus eligible assists on kills credited to the
+player's team. The count beside the percentage uses that same numerator. Unusual
+same-team assist credit stays in the displayed K/D/A but does not increase participation.
+
 ## Match search
 
 The **Find a match** form accepts a numeric match ID with optional surrounding whitespace and

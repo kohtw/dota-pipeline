@@ -114,3 +114,17 @@ INSERT INTO stg.steam_players (match_id, player_slot, hero_id, kills, deaths, as
  (9100000009, 130, 8, 5, 5, 5, 0),
  (9100000009, 131, 9, 5, 5, 5, 0),
  (9100000009, 132, 10, 5, 5, 5, 0);
+
+-- Manually specified replay-reconciliation expectations for the two small clean
+-- fixtures. Ten-minute duration excludes them from ranked hero pick-rate inputs.
+INSERT INTO stg.steam_matches
+ (match_id, match_seq_num, start_time, duration, game_mode, lobby_type, radiant_win, human_players) VALUES
+ (9000000001, 9000000001, 1700000000, 600, 22, 7, TRUE, 4),
+ (9000000002, 9000000002, 1700000600, 600, 22, 7, TRUE, 2);
+INSERT INTO stg.steam_players (match_id, player_slot, hero_id, kills, deaths, assists, leaver_status) VALUES
+ (9000000001,   0,  1, 2, 1, 0, 0),
+ (9000000001,   1,  5, 1, 1, 2, 0),
+ (9000000001, 128,  2, 1, 2, 1, 0),
+ (9000000001, 129, 25, 1, 1, 1, 0),
+ (9000000002,   0,  1, 1, 0, 1, 0),
+ (9000000002, 128,  2, 0, 2, 0, 0);

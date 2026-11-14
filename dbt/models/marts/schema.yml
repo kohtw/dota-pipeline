@@ -29,10 +29,26 @@ models:
         data_tests: [not_null]
 
   - name: kill_participation
-    description: "One player in one match: kills plus assists as a share of the team's kills. NULL when the team has no kills."
+    description: "One player in one match. Full counter-credited K/D/A remains available for reconciliation. Participation uses credited kills plus eligible assists on the player's team's credited kills; same-side assists stay in K/D/A but do not enter participation. NULL when the team has no credited kills."
     columns:
       - name: player_key
         data_tests: [not_null, unique]
+      - name: kills_from_events
+        description: "Deaths counted by credited_killer_slot, not the direct last hitter."
+        data_tests: [not_null]
+      - name: deaths_from_events
+        data_tests: [not_null]
+      - name: assists_from_events
+        description: "Every recorded assist, including same-side credit and assists without a player-credited kill."
+        data_tests: [not_null]
+      - name: assists_on_team_kills
+        description: "Opposing-side assists on kills credited to this player's team; excludes the credited killer."
+        data_tests: [not_null]
+      - name: kill_involvements
+        description: "Participation numerator: kills_from_events plus assists_on_team_kills."
+        data_tests: [not_null]
+      - name: team_kills
+        data_tests: [not_null]
 
   - name: hero_pick_win_rate
     description: "One row per hero in ranked All Pick matches (lobby 7, mode 22, 15+ minutes, 10 humans, known winner): picks, wins, pick_rate = picks / ranked matches, win_rate = wins / picks. Heroes never picked do not appear."

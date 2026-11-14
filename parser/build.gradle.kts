@@ -36,3 +36,14 @@ tasks.register<Copy>("s3aJars") {
     from(s3a)
     into(layout.buildDirectory.dir("s3a"))
 }
+
+// Small offline checks use Java assertions and the already-resolved compile jars.
+sourceSets.test {
+    compileClasspath += configurations.compileClasspath.get()
+}
+tasks.register<JavaExec>("extractorTests") {
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath + configurations.compileClasspath.get()
+    mainClass.set("ReplayExtractorTest")
+    enableAssertions = true
+}

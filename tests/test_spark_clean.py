@@ -50,12 +50,14 @@ def fixture(spark):
         for tick in [30, 90]:
             resource.append({"match_id": MATCH, "tick": tick, "index": i, "m_vecPlayerData.m_iPlayerTeam": 2 if i < 5 else 3,
                 "m_vecPlayerTeamData.m_iTeamSlot": i % 5, "m_vecPlayerTeamData.m_nSelectedHeroID": 0 if tick == 30 else i + 1,
-                "m_vecPlayerTeamData.m_iLevel": 2, "m_vecPlayerTeamData.m_iKills": 1 if i == 0 else 0,
-                "m_vecPlayerTeamData.m_iDeaths": 1 if i == 5 else 0, "m_vecPlayerTeamData.m_iAssists": 1 if i == 1 else 0})
+                "m_vecPlayerTeamData.m_iLevel": 2, "m_vecPlayerTeamData.m_iKills": 1 if i == 0 and tick == 90 else 0,
+                "m_vecPlayerTeamData.m_iDeaths": 1 if i == 5 and tick == 90 else 0, "m_vecPlayerTeamData.m_iAssists": 1 if i == 1 and tick == 90 else 0})
+    kda_rows = [{**row, "tick": 82 if row["tick"] == 90 else row["tick"]} for row in resource]
     resource.append({"match_id": MATCH, "tick": 90, "index": 10, "m_vecPlayerData.m_iPlayerTeam": 1})
     pr_fields = [("match_id", "long"), ("tick", "int"), ("index", "int"), ("m_vecPlayerData.m_iPlayerTeam", "int")]
     pr_fields += [(f"m_vecPlayerTeamData.{p}", "int") for p in ["m_iTeamSlot", "m_nSelectedHeroID", "m_iLevel", "m_iKills", "m_iDeaths", "m_iAssists"]]
     out["player_resource"] = frame(spark, resource, pr_fields)
+    out["kda_changes"] = frame(spark, kda_rows, pr_fields)
     tdprops = ["m_iNetWorth", "m_iReliableGold", "m_iUnreliableGold", "m_iTotalEarnedGold", "m_iTotalEarnedXP",
                "m_iLastHitCount", "m_iDenyCount", "m_flHeroDamage", "m_flTowerDamage", "m_fHealing"]
     tdrows = []
@@ -96,8 +98,10 @@ def fixture(spark):
     combat_rows.append({"match_id": MATCH, "tick": 80, "type": "DOTA_COMBATLOG_DEATH", "attacker_name_idx": 0,
         "target_name_idx": 5, "attacker_hero": True, "target_hero": True,
         "attacker_illusion": False, "target_illusion": False, "assist_players": "0;1"})
+    for row in combat_rows:
+        row["damage_source_name_idx"] = row.get("attacker_name_idx")
     out["combatlog"] = frame(spark, combat_rows, [("match_id", "long"), ("tick", "int"), ("type", "string"),
-        ("attacker_name_idx", "int"), ("target_name_idx", "int"), ("inflictor_name_idx", "int"), ("value", "int"),
+        ("attacker_name_idx", "int"), ("damage_source_name_idx", "int"), ("target_name_idx", "int"), ("inflictor_name_idx", "int"), ("value", "int"),
         ("attacker_hero", "boolean"), ("target_hero", "boolean"), ("attacker_illusion", "boolean"), ("target_illusion", "boolean"), ("assist_players", "string")])
     out["entity_names"] = frame(spark, [{"match_id": MATCH, "idx": i, "name": f"item_test_{i}"} for i in range(10)],
         [("match_id", "long"), ("idx", "int"), ("name", "string")])
@@ -113,7 +117,7 @@ class SparkCleanTests(unittest.TestCase):
         cls.spark = clean.spark_session()
         cls.spark.sparkContext.setLogLevel("ERROR")
         cls.raw = fixture(cls.spark)
-        cls.result = clean.build_clean(cls.raw)
+        cls.result = clean.build_clean(cls.raw, MATCH)
         cls.report = clean.validate(cls.result, MATCH)
 
     @classmethod
@@ -142,17 +146,18 @@ class SparkCleanTests(unittest.TestCase):
             self.assertEqual(tables[name].schema.simpleString(), T.StructType.fromDDL(ddl).simpleString())
 
     def test_conflicting_deaths_and_mismatches_block_completion(self):
+        # The new contract blocks inconsistent credit before publishing tables.
         raw = dict(self.raw)
-        extra_death = raw["combatlog"].filter(F.col("type") == "DOTA_COMBATLOG_DEATH").withColumn("attacker_name_idx", F.lit(2))
-        raw["combatlog"] = raw["combatlog"].unionByName(extra_death)
-        result = clean.build_clean(raw)
-        try:
-            report = clean.validate(result, MATCH)
-            self.assertEqual(report["findings"]["conflicting_deaths"]["rows"], 2)
-            self.assertGreater(report["findings"]["scoreboard_disagreements"]["rows"], 0)
-            self.assertTrue(report["errors"])
-        finally:
-            result.release()
+        extra = raw["combatlog"].filter(F.col("type") == "DOTA_COMBATLOG_DEATH").withColumn(
+            "attacker_name_idx", F.lit(2)).withColumn("damage_source_name_idx", F.lit(2))
+        raw["combatlog"] = raw["combatlog"].unionByName(extra)
+        with self.assertRaisesRegex(clean.CreditError, "Conflicting death sources"):
+            clean.build_clean(raw, MATCH)
+        raw = dict(self.raw)
+        raw["kda_changes"] = raw["kda_changes"].withColumn(
+            "m_vecPlayerTeamData.m_iKills", F.lit(0))
+        with self.assertRaisesRegex(clean.CreditError, "Final scoreboard disagrees"):
+            clean.build_clean(raw, MATCH)
 
     def test_rerun_clears_empty_partitions_and_preserves_other_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,13 +200,13 @@ class SparkCleanTests(unittest.TestCase):
 
     def test_deleted_inventory_and_unfinished_raw_inputs_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "completion marker missing"):
+            with self.assertRaisesRegex(ValueError, "Missing per-tick kda_changes"):
                 clean.read_match(self.spark, tmp, MATCH)
         raw = dict(self.raw)
         deletion = raw["item_entities"].filter(F.col("handle") == 1000).withColumn(
             "event", F.lit("deleted")).withColumn("tick", F.lit(80))
         raw["item_entities"] = raw["item_entities"].unionByName(deletion)
-        result = clean.build_clean(raw)
+        result = clean.build_clean(raw, MATCH)
         try:
             report = clean.validate(result, MATCH)
             self.assertEqual(report["table_rows"]["final_inventory"], 9)

@@ -9,7 +9,7 @@ because load_match is idempotent (delete the match's rows, insert, one transacti
 
 Needs the warehouse Postgres (the `warehouse` service in docker-compose; WAREHOUSE_* env vars).
 
-  find_unloaded -> load_and_retain (one per match: load_one -> retain_dem) -> CLEAN_LOADED
+  find_unloaded + apply_schema -> load_and_retain (one per match: load_one -> retain_dem) -> CLEAN_LOADED
 
 load_one runs load_match, then writes the _loaded marker. retain_dem then applies the Airflow
 Variable `dem_retention` (keep | delete, default keep) to the match's raw replays/{id}.dem, but
@@ -41,6 +41,19 @@ MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can'
 )
 def load_pending():
     @task
+    def apply_schema() -> list[str]:
+        # dbt also applies repeat-safe init SQL, but it runs AFTER loading. Apply
+        # additions here first so older volumes can receive the new credit fields.
+        from dota import warehouse
+        from dota.config import WAREHOUSE_INIT_DIR
+
+        conn = warehouse.connect()
+        try:
+            return warehouse.apply_init_sql(WAREHOUSE_INIT_DIR, conn)
+        finally:
+            conn.close()
+
+    @task
     def find_unloaded() -> list[int]:
         from dota import storage, warehouse
 
@@ -53,10 +66,12 @@ def load_pending():
     def load_and_retain(match_id: int):
         @task(map_index_template=MATCH_LABEL, max_active_tis_per_dagrun=PARALLEL_LOADS, outlets=[CLEAN_LOADED])
         def load_one(match_id: int) -> dict[str, int]:
-            from dota import storage, warehouse
+            from dota import clean_contract, storage, warehouse
 
             get_current_context()["match_label"] = str(match_id)
 
+            # Recheck old completion markers against the current contract too.
+            clean_contract.check_parsed(match_id, storage.read, storage.list_keys)
             conn = warehouse.connect()  # one connection per mapped task instance
             try:
                 counts = warehouse.load_match(match_id, storage.read, storage.list_keys, conn)
@@ -82,7 +97,9 @@ def load_pending():
 
         load_one(match_id) >> retain_dem(match_id)
 
-    load_and_retain.expand(match_id=find_unloaded())
+    schema_ready = apply_schema()
+    loads = load_and_retain.expand(match_id=find_unloaded())
+    schema_ready >> loads
 
 
 load_pending()

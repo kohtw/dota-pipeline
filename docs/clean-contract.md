@@ -18,7 +18,8 @@ The DDL is in [`warehouse/init/`](../warehouse/init/). This file documents it; k
 - **Game clock:** `game_time_s = (tick - game_start_tick) / 30.0`. `game_start_tick` is the first `gamerules` tick with `m_pGameRules.m_nGameState = 5`. Pre-game is negative. `tick` is kept next to it as the join key.
 - **Teams:** `2` Radiant, `3` Dire.
 - **World coordinates:** `x = m_cellX * 128 + m_vecX - 16384`, same for `y`.
-- **Real heroes only:** drop any hero entity whose `m_hReplicatingOtherHeroModel` is not `16777215` (illusions). Drop combat-log rows where an illusion is the attacker or target.
+- **Real heroes only:** drop illusion entities from position/inventory processing and illusion participants from damage processing. For deaths, exclude illusion victims but retain illusion attackers: the real victim's death and the owner's kill credit can still count.
+- **Scoreboard credit:** per-tick `kda_changes` counters establish deaths, kills and assists. Keep direct last hitter separate from credited killer. Every counter increment must be accounted for and final totals must equal the final sampled scoreboard. Reports identify `credit_method = per_tick_counters` and `contract_version = kda-credit-v1`.
 - **Names resolved:** `*_name_idx` columns are joined to `names.name`; item handles through `item_entities` to `entity_names`.
 - **Nulls:** a missing value is `NULL`, never `0`. Exception: key columns cannot be null (see `inflictor_name`).
 - **Money:** `net_worth` (gold plus the value of items) and `unspent_gold` (gold in hand) are different numbers and are never mixed.
@@ -97,22 +98,69 @@ Only `DOTA_COMBATLOG_DAMAGE` rows where the attacker or the target is a real her
 
 ### `deaths`
 
-**Grain:** one real hero death. **Key:** `(match_id, tick, victim_slot)`.
+**Grain:** one scoreboard-counted real hero death. **Key:** `(match_id, tick, victim_slot)`.
 
-From `DOTA_COMBATLOG_DEATH` rows whose target is a real hero.
+Start from real-hero `DOTA_COMBATLOG_DEATH` records, including illusion attackers but excluding
+illusion victims. Merge consistent self/non-self duplicate records for the same death; conflicting
+sources block the match. Count a death only when its victim's death counter rises in the configured
+window (default event tick through four ticks later, inclusive). Reincarnation records with no
+counter rise are not scoreboard deaths and remain review notes.
 
-| Column                | Type              | Built from                                             |
-| --------------------- | ----------------- | ------------------------------------------------------ |
-| `tick`, `game_time_s` |                   |                                                        |
-| `victim_slot`         | INTEGER           | target hero to slot                                    |
-| `killer_slot`         | INTEGER, nullable | attacker hero to slot; NULL if a creep or tower killed |
-| `killer_name`         | TEXT              | attacker name                                          |
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `tick` | INTEGER | Combat-log death tick, not the counter-update tick |
+| `game_time_s` | DOUBLE PRECISION | Game clock at the death tick |
+| `victim_slot` | INTEGER, not null | Real victim's normalized player slot |
+| `killer_slot` | INTEGER, nullable | Direct last hitter's hero slot; NULL for a tower, creep or unmapped unit |
+| `killer_name` | TEXT, nullable | Direct last hitter's name, including non-player units |
+| `credited_killer_slot` | INTEGER, nullable | Player whose kill counter establishes credit; 0-9, NULL only if nobody received player kill credit |
+| `link_status` | TEXT, not null | `exact`, `participant_assumed`, or `same_side_possible` |
+
+Resolve source ownership and counter increases together. `killer_slot` is not a scoreboard kill
+key: a tower can be the last hitter while `credited_killer_slot` identifies the credited player.
+A decrease, missing increment, inconsistent final total, conflicting source or non-unique primary
+assignment blocks completion. The bounded attribution solver is in `spark_jobs/clean_replays.py`.
+
+`participant_assumed` means relaxing participant constraints allows a different link.
+`same_side_possible` means allowing same-team credit allows a different link. These labels retain
+link uncertainty even when final player totals are exact; exact totals alone do not prove each
+individual assist-to-death association.
 
 ### `death_assists`
 
-**Grain:** one player credited with an assist on one death. **Key:** `(match_id, tick, victim_slot, assist_slot)`.
+**Grain:** one player credited with an assist on one scoreboard death.
+**Key:** `(match_id, tick, victim_slot, assist_slot)`.
 
-Split the `;`-separated `assist_players` string of the death row; each player ID divided by 2 is an `assist_slot`.
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `tick` | INTEGER | The linked death's combat-log tick |
+| `victim_slot` | INTEGER, not null | Victim of the linked death |
+| `assist_slot` | INTEGER, not null | Player whose assist counter establishes credit |
+| `same_side` | BOOLEAN, not null | Whether assister and victim are on the same team |
+
+Credit comes from per-tick assist-counter increases, not from counting `assist_players`.
+The raw list provides participant constraints, uses normalized slots 0-9 directly, and may omit
+credited players or include the killer. Never divide those participant IDs by two. Retain actual
+same-team credit, including a victim's recorded assist increase, with `same_side = true`.
+
+### Upgrading existing warehouses
+
+`warehouse/init/02_clean_tables.sql` declares the credit fields for fresh tables and
+ends with repeat-safe `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements for existing
+Postgres/DuckDB databases. No separate migration file is required.
+Existing rows retain NULL credit fields because their old last-hitter data does not establish
+scoreboard credit or confidence. Re-clean and reload those matches; never backfill
+`credited_killer_slot = killer_slot`, `link_status = exact`, or `same_side = false` by assumption.
+The new clean contract and loader reject incoming legacy/missing/null credit labels. Fresh tables
+also require non-null `link_status` and `same_side`; upgraded legacy columns remain nullable until
+historical rows have been replaced. `load_pending.apply_schema` applies init/migration SQL before
+new Parquet rows are inserted, independently of the later dbt build.
+
+dbt counts kills by `credited_killer_slot` and retains the full assist ledger for K/D/A
+reconciliation. The dashboard's participation numerator is `kill_involvements`, which adds
+credited kills to eligible assists on kills credited to that player's team. Same-side assists
+and assists on deaths with no player-credited kill remain in K/D/A but are excluded from this
+numerator. Rebuild the marts after migrating and reloading historical clean rows.
 
 ### `purchases`
 
@@ -137,15 +185,22 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 | `damage_by_pair`     | attacker, target, source in a match | who damaged whom, and share of team hero damage     |
 | `kill_participation` | one player in one match             | share of team kills the player took part in         |
 
+`kill_participation` retains `kills_from_events`, `deaths_from_events`, and the full
+`assists_from_events` for strict scoreboard comparison. `assists_on_team_kills` is the subset
+eligible for participation, and `kill_involvements = kills_from_events + assists_on_team_kills`.
+The ratio is `kill_involvements / team_kills`, or NULL when the team has no credited kills.
+The dashboard uses this same numerator in its count and percentage displays. Link-status labels
+remain in clean output and do not silently remove otherwise established scoreboard totals.
+
 Later: `death_context`, `economy_gap`.
 
 ## Assumptions to verify on a real parsed match
 
-Written from the raw contract alone. Nobody has checked these against real Parquet yet.
+These original replay checks predate the counter-credit implementation. The current K/D/A contract above was checked on the ten local parsed matches; other game modes and fresh samples still need validation.
 
 1. `heroes.m_iPlayerID / 2` equals `players.slot` (raw contract says `m_iPlayerID = 2 x slot`).
 2. Combat-log flag columns exist under the names used (`attacker_hero`, `target_hero`, `attacker_illusion`, `target_illusion`). Raw contract lists only `attacker_hero` and `target_illusion` as examples.
-3. `assist_players` holds the same IDs as `m_iPlayerID`.
+3. Verified correction: `assist_players` already uses normalized slots 0-9, unlike `m_iPlayerID`. It is a participant list, not the assist-credit ledger.
 4. A PURCHASE row's `target` is the buyer and `value` is a `names` index.
 5. `m_flGameEndTime` is set by the last `gamerules` row.
 6. Steam tables (`steam_matches`, `steam_players`) are not defined yet. See the next section for what is already known.

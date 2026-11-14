@@ -17,6 +17,10 @@ def table(name: str, **overrides) -> pa.Table:
         cols = {c: [1] * 10 for c in cc.REQUIRED_COLUMNS[name]} | {"team": [2] * 5 + [3] * 5}
     else:
         cols = {c: [1] for c in cc.REQUIRED_COLUMNS[name]}
+    if name == "deaths":
+        cols.update(credited_killer_slot=pa.array([None], type=pa.int32()), link_status=["exact"])
+    if name == "death_assists":
+        cols.update(same_side=[False])
     return pa.table({**cols, **overrides})
 
 
@@ -53,6 +57,37 @@ def test_valid_output_passes_and_counts_rows():
 
 def test_extra_columns_are_allowed():
     assert check(store(positions=table("positions", z=[0.0])))["positions"] == 1
+
+
+@pytest.mark.parametrize("name, column", [
+    ("deaths", "credited_killer_slot"), ("deaths", "link_status"), ("death_assists", "same_side"),
+])
+def test_legacy_credit_files_are_rejected(name, column):
+    with pytest.raises(cc.CleanContractError, match="missing columns"):
+        check(store(**{name: table(name).drop_columns([column])}))
+
+
+@pytest.mark.parametrize("label", cc.LINK_STATUSES)
+def test_credit_labels_and_uncredited_kills_are_preserved(label):
+    assert check(store(deaths=table("deaths", link_status=[label])))["deaths"] == 1
+
+
+@pytest.mark.parametrize("label", [None, "ambiguous", ""])
+def test_invalid_credit_labels_are_rejected(label):
+    with pytest.raises(cc.CleanContractError, match="link_status"):
+        check(store(deaths=table("deaths", link_status=pa.array([label], type=pa.string()))))
+
+
+@pytest.mark.parametrize("slot", [-1, 10])
+def test_invalid_credited_slots_are_rejected(slot):
+    with pytest.raises(cc.CleanContractError, match="NULL or 0-9"):
+        check(store(deaths=table("deaths", credited_killer_slot=[slot])))
+
+
+@pytest.mark.parametrize("value", [None, 0, "false"])
+def test_assist_side_must_be_an_explicit_boolean(value):
+    with pytest.raises(cc.CleanContractError, match="same_side"):
+        check(store(death_assists=table("death_assists", same_side=[value])))
 
 
 def test_missing_column_fails():
