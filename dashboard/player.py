@@ -126,6 +126,7 @@ def render_player_page(
     roster: list[dict] | None = None,
     team_advantage: list[dict] | None = None,
     inventory_by_slot: dict[int, list[dict] | None] | None = None,
+    fight_context: dict | None = None,
 ) -> None:
     """Display the player page from match records supplied by the app.
 
@@ -295,5 +296,5 @@ def render_player_page(
     render_team_advantage(
         team_advantage, match_id,
         progression_key=f"progression_range_{match_id}_{player['slot']}" if progression_bounds else None,
-        progression_bounds=progression_bounds,
+        progression_bounds=progression_bounds, **(fight_context or {}),
     )

@@ -55,10 +55,34 @@ def test_team_chart_keeps_signs_zero_and_gaps(dashboard_database):
     assert list(figure.data[0].y) == [row["net_worth_advantage"] for row in rows]
     assert figure.data[0].y[0] == 0
     assert figure.data[0].y[6] is None
-    assert not figure.data[0].connectgaps
+    assert figure.data[0].type == "bar"
+    colors = list(figure.data[0].marker.color)
+    assert colors[0] == charts.EVEN_COLOR and colors[1] == charts.DIRE_COLOR and colors[6] == charts.EVEN_COLOR
     assert figure.layout.yaxis.zeroline
     assert "Radiant" in figure.layout.yaxis.title.text
     assert rows == before
+    change = charts.build_team_advantage_chart(rows, change=True)
+    assert change.data[0].type == "scatter" and not change.data[0].connectgaps
+
+
+def fight(number, swing, kind="teamfight", winner=2):
+    return dict(fight_number=number, start_s=40.0, end_s=55.0, duration_s=15.0, deaths=3, radiant_deaths=1,
+                dire_deaths=2, kind=kind, winning_team=winner, center_x=0, center_y=0, radiant_hero_damage=1200,
+                dire_hero_damage=800, participants=7, advantage_before=0, advantage_after=swing, advantage_swing=swing)
+
+
+def test_team_chart_marks_only_key_teamfights(dashboard_database):
+    charts = import_module("charts")
+    fights = [fight(1, 2500), fight(2, -1999), fight(3, 4000, kind="skirmish"), fight(4, None)]
+    assert [row["fight_number"] for row in charts.key_teamfights(fights)] == [1]
+    deaths = [dict(fight_number=1, victim_team=3, victim_slot=5), dict(fight_number=2, victim_team=2, victim_slot=0)]
+    figure = charts.build_team_advantage_chart(timeline(), fights=fights, deaths=deaths, labels={5: "Axe <b>"})
+    markers = figure.data[1]
+    assert list(markers.text) == ["⚔"] and list(markers.x) == [47.5]
+    hover = markers.hovertext[0]
+    assert "Radiant won 2–1" in hover and "+2,500" in hover and "Dire lost: Axe &lt;b&gt;" in hover
+    assert len(figure.layout.shapes) == 1 and figure.layout.shapes[0].x0 == 30
+    assert len(charts.build_team_advantage_chart(timeline()).data) == 1
 
 
 def test_dense_progression_preserves_measurements_gaps_and_isolated_points(dashboard_database):

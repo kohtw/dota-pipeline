@@ -93,6 +93,59 @@ def format_items(items: list[str] | None) -> str:
     return ", ".join(items)
 
 
+# Scoreboard columns after the hero: (header, hover explanation, player field). Items come first,
+# beside the hero; the rest are numbers.
+SCOREBOARD_COLUMNS = (
+    ("Hero", "", "hero_label"),
+    ("Items", "Final main inventory, six slots", "main_inventory"),
+    ("Lvl", "Final hero level", "level"),
+    ("K", "Kills", "kills"),
+    ("D", "Deaths", "deaths"),
+    ("A", "Assists", "assists"),
+    ("KP", "Kill participation: share of team kills scored or assisted", "kill_participation"),
+    ("LH", "Last hits", "last_hits"),
+    ("DN", "Denies", "denies"),
+    ("Net worth", "Final net worth", "net_worth"),
+    ("Gold", "Unspent gold at the end", "gold"),
+    ("GPM", "Gold earned per minute", "gpm"),
+    ("XPM", "Experience earned per minute", "xpm"),
+    ("Hero dmg", "Damage dealt to enemy heroes", "hero_damage"),
+    ("Dmg taken", "Damage taken from enemy heroes (replay combat log)", "damage_taken"),
+    ("Tower dmg", "Damage dealt to towers", "tower_damage"),
+    ("Heal", "Healing done", "healing"),
+)
+MAIN_INVENTORY_SLOTS = 6
+_SKIP_WORDS = {"of", "the", "and"}
+
+
+def item_initials(name: str) -> str:
+    """Two or three letters standing in for an item icon: word initials, or the start of one word."""
+    words = [word for word in name.replace("-", " ").replace("'", "").split() if word.lower() not in _SKIP_WORDS]
+    if not words:
+        return "?"
+    if len(words) == 1:
+        return words[0][:2].title()
+    return "".join(word[0] for word in words[:3]).upper()
+
+
+def _item_hue(name: str) -> int:
+    """A stable colour per item, so the same item looks the same in every row."""
+    return sum((index + 1) * ord(char) for index, char in enumerate(name)) % 360
+
+
+def item_tiles(items: list[str] | None) -> str:
+    """Six placeholder item icons as HTML: a coloured tile with initials per item, dashed when empty."""
+    if items is None:
+        return f'<span class="item-note">{escape(format_items(None))}</span>'
+    tiles = [
+        f'<span class="item" title="{escape(item, quote=True)}" '
+        f'style="background: hsl({_item_hue(item)} 45% 34%)">{escape(item_initials(item))}</span>'
+        for item in items[:MAIN_INVENTORY_SLOTS]
+    ]
+    tiles += ['<span class="item empty" title="Empty slot"></span>'] * (MAIN_INVENTORY_SLOTS - len(tiles))
+    return f'<span class="item-tiles" aria-label="{escape(format_items(items), quote=True)}">{"".join(tiles)}</span>'
+
+
 def render_match_header(match: dict) -> None:
     """Render match context using metadata supplied by the application's loader."""
     st.title("Match overview")
@@ -119,21 +172,22 @@ def render_team_scoreboard(team_label: str, players: list[dict]) -> None:
         return
 
     st.caption(
-        "K / D / A: kills / deaths / assists · LH: last hits · DN: denies. "
-        "KP is the percentage of team kills the player scored or assisted. "
-        "KP shows — when the team had zero kills or the data is unavailable. "
-        "Gold is unspent gold. Final main inventory shows items held at match end, "
-        "including passive items; backpack, stash, neutral-slot items, "
-        "and consumed upgrades are excluded. — means unavailable."
+        "Items: final main inventory (six slots; hover a tile for the item). Backpack, stash, neutral-slot "
+        "items and consumed upgrades are left out. Lvl: final level · K / D / A: kills / deaths / assists · "
+        "KP: share of team kills scored or assisted · LH / DN: last hits / denies · Gold: unspent gold · "
+        "GPM / XPM: gold and XP earned per minute · Hero dmg: damage to enemy heroes · Dmg taken: damage "
+        "from enemy heroes · Tower dmg: damage to towers · Heal: healing done. Hover a header for its "
+        "meaning. — means unavailable."
     )
 
     # A native HTML table keeps headers and cells aligned while giving short
     # statistics only the space they need. Escaping all record values prevents
     # hero and item names from being interpreted as HTML.
-    labels = ["Hero", "K", "D", "A", "LH", "DN", "Net worth", "Gold", "KP", "Final main inventory"]
-    header = "".join(f'<th scope="col">{escape(label)}</th>' for label in labels)
-    # Keep these fields in header order. KP and inventory use their own formatters.
-    stat_fields = ["kills", "deaths", "assists", "last_hits", "denies", "net_worth", "gold"]
+    header = "".join(
+        f'<th scope="col" title="{escape(tip, quote=True)}">{escape(label)}</th>' if tip
+        else f'<th scope="col">{escape(label)}</th>'
+        for label, tip, _ in SCOREBOARD_COLUMNS
+    )
     rows = []
     for player in sorted(players, key=lambda participant: participant["slot"]):
         hero = escape(player.get("hero_label") or player.get("hero") or MISSING_VALUE)
@@ -142,10 +196,11 @@ def render_team_scoreboard(team_label: str, players: list[dict]) -> None:
         query = urlencode({"match_id": player["match_id"], "player_slot": player["slot"]})
         link = f'<a href="?{escape(query, quote=True)}" target="_self">{hero}</a>'
         cells = f'<td class="hero">{link}</td>'
-        for field in stat_fields:
-            cells += f'<td class="number">{escape(format_number(player.get(field)))}</td>'
-        cells += f'<td class="number">{format_percentage(player.get("kill_participation"))}</td>'
-        cells += f'<td class="items">{escape(format_items(player.get("main_inventory")))}</td>'
+        cells += f'<td class="items">{item_tiles(player.get("main_inventory"))}</td>'
+        for _, _, field in SCOREBOARD_COLUMNS[2:]:
+            text = (format_percentage(player.get(field)) if field == "kill_participation"
+                    else format_number(player.get(field)))
+            cells += f'<td class="number">{escape(text)}</td>'
         rows.append(f"<tr>{cells}</tr>")
 
     # Scope styles to the scoreboard so the match header and other Streamlit
@@ -169,12 +224,20 @@ def render_team_scoreboard(team_label: str, players: list[dict]) -> None:
             outline-offset: 3px; }
         .dota-scoreboard .number { width: 1%; white-space: nowrap;
             text-align: right; font-variant-numeric: tabular-nums; }
-        .dota-scoreboard th:nth-child(n+2):nth-child(-n+9) { text-align: right; }
-        .dota-scoreboard .items { width: 42%; min-width: 240px; overflow-wrap: anywhere; }
+        .dota-scoreboard th:nth-child(n+3) { text-align: right; }
+        .dota-scoreboard th[title] { cursor: help; text-decoration: underline dotted; text-underline-offset: .2em; }
+        .dota-scoreboard .items { width: 1%; white-space: nowrap; }
+        .dota-scoreboard .item-tiles { display: inline-flex; gap: 3px; }
+        .dota-scoreboard .item { width: 30px; height: 30px; border-radius: 5px; display: inline-flex;
+            align-items: center; justify-content: center; font-size: .62rem; font-weight: 700;
+            letter-spacing: .02em; color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,.6);
+            border: 1px solid rgba(255,255,255,.18); box-sizing: border-box; }
+        .dota-scoreboard .item.empty { background: rgba(128,128,128,.10);
+            border: 1px dashed rgba(128,128,128,.35); }
+        .dota-scoreboard .item-note { font-size: .8rem; opacity: .7; }
         @media (max-width: 800px) {
             .dota-scoreboard th, .dota-scoreboard td { padding-inline: .45rem; }
             .dota-scoreboard .hero { min-width: 125px; }
-            .dota-scoreboard .items { min-width: 200px; }
         }
         </style>
         """

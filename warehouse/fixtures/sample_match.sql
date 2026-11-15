@@ -34,6 +34,20 @@ INSERT INTO clean.positions VALUES
  (9000000001, 0, 1800, 0.0, -6700.0, -6200.0),
  (9000000001, 5, 1800, 0.0,  6500.0,  6000.0);
 
+-- Map fixture (event marts). Slot 0 plays bot, slot 5 top.
+-- Slot 5 dies at tick 4800 (d1): the corpse stays at (-5050, 5000) until the respawn at 2:00
+-- (tick 5400, back in the Dire base), so d1 has dead_s 20 and the two corpse samples are dead.
+-- Slot 0 dies at tick 16800 (d5) and the replay has no sample after the corpse: no respawn.
+INSERT INTO clean.positions VALUES
+ (9000000001, 0,  3600,  60.0,  5000.0, -6000.0),
+ (9000000001, 0, 16770, 499.0,  5000.0, -6000.0),
+ (9000000001, 0, 16830, 501.0,  5100.0, -6000.0),
+ (9000000001, 5,  4770,  99.0, -5000.0,  5000.0),
+ (9000000001, 5,  4830, 101.0, -5050.0,  5000.0),
+ (9000000001, 5,  4860, 102.0, -5050.0,  5000.0),
+ (9000000001, 5,  5400, 120.0,  5600.0,  5000.0),
+ (9000000001, 5,  6000, 140.0, -5000.0,  4900.0);
+
 INSERT INTO clean.damage_events VALUES
  (9000000001, 3000, 40.0, 'npc_dota_hero_antimage',      'npc_dota_hero_axe',   'dota_unknown',             0, 5, 300, 5),
  (9000000001, 3000, 40.0, 'npc_dota_hero_antimage',      'npc_dota_hero_lina',  'dota_unknown',             0, 6, 100, 2),

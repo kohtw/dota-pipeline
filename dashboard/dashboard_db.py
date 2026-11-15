@@ -110,6 +110,65 @@ def load_hero_matchups(config: WarehouseConfig, hero_id: int) -> list[dict]:
     return matchups
 
 
+HERO_DURATION_COLUMNS = ("bucket_order", "duration_bucket", "matches", "wins", "win_rate")
+HERO_ALLY_COLUMNS = ("ally_hero_id", "ally_name", "matches", "wins", "losses", "win_rate", "overall_win_rate",
+                     "win_rate_difference_pp")
+
+
+def _records(columns: tuple[str, ...], rows: list, mart: str) -> list[dict]:
+    try:
+        return [dict(zip(columns, row, strict=True)) for row in rows]
+    except (TypeError, ValueError) as error:
+        raise DashboardDatabaseError(f"The {mart} mart returned unexpected columns.") from error
+
+
+def _check_hero(hero_id: int, what: str) -> None:
+    if type(hero_id) is not int or not 0 < hero_id < 2**31:
+        raise DashboardDatabaseError(f"Choose a valid hero to load {what}.")
+
+
+def load_hero_duration(config: WarehouseConfig, hero_id: int) -> list[dict]:
+    """The selected hero's win rate in each match-length bucket, shortest first."""
+    _check_hero(hero_id, "win rates by game length")
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT " + ", ".join(HERO_DURATION_COLUMNS) + " FROM marts.hero_duration_win_rate"
+            " WHERE hero_id = %s ORDER BY bucket_order",
+            (hero_id,),
+        )
+        rows = _records(HERO_DURATION_COLUMNS, cursor.fetchall(), "hero game-length")
+    for row in rows:
+        matches, wins, rate = row["matches"], row["wins"], row["win_rate"]
+        if (type(matches) is not int or type(wins) is not int or not 0 <= wins <= matches or matches == 0
+                or rate is None or not isfinite(rate) or abs(rate - wins / matches) > 0.000001
+                or row["bucket_order"] not in (1, 2, 3, 4)):
+            raise DashboardDatabaseError("The hero game-length mart contains invalid counts or rates.")
+    return rows
+
+
+def load_hero_allies(config: WarehouseConfig, hero_id: int) -> list[dict]:
+    """Results with each ally the selected hero was teamed with, most matches first."""
+    _check_hero(hero_id, "ally results")
+    with open_postgres_database(config) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT " + ", ".join(HERO_ALLY_COLUMNS) + " FROM marts.hero_ally_synergy WHERE hero_id = %s"
+            " ORDER BY matches DESC, ally_hero_id",
+            (hero_id,),
+        )
+        rows = _records(HERO_ALLY_COLUMNS, cursor.fetchall(), "hero ally")
+    for row in rows:
+        matches, wins, rate = row["matches"], row["wins"], row["win_rate"]
+        difference = row["win_rate_difference_pp"]
+        if (type(row["ally_hero_id"]) is not int or row["ally_hero_id"] == hero_id
+                or type(matches) is not int or type(wins) is not int or not 0 <= wins <= matches or matches == 0
+                or any(value is None or not isfinite(value) for value in (rate, difference))
+                or abs(rate - wins / matches) > 0.000001):
+            raise DashboardDatabaseError("The hero ally mart contains invalid counts or rates.")
+        name = row.pop("ally_name")
+        row["ally_label"] = name.strip() if isinstance(name, str) and name.strip() else f"Hero {row['ally_hero_id']}"
+    return rows
+
+
 def load_hero_performance(config: WarehouseConfig, hero_id: int) -> dict | None:
     """Read one selected hero's profile; missing rows are not fabricated as zeros."""
     if type(hero_id) is not int or not 0 < hero_id < 2**31:
@@ -216,6 +275,7 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
             SELECT s.match_id, s.player_slot AS slot, s.hero_name AS hero, s.hero_localized_name AS hero_label, s.team,
                    s.kills, s.deaths, s.assists, s.last_hits, s.denies, s.net_worth,
                    s.unspent_gold AS gold, s.final_item_labels AS final_items, s.duration_s, s.won,
+                   s.level, s.gpm, s.total_earned_xp, s.hero_damage, s.tower_damage, s.healing,
                    kp.kill_participation, CAST(kp.team_kills AS BIGINT) AS team_kills,
                    kp.kill_involvements
             FROM marts.match_scoreboard AS s
@@ -236,6 +296,16 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
     losing_teams = set()
     for row in rows:
         player = dict(zip(columns, row))
+        duration_s = player.get("duration_s")
+        # Per-minute rates as whole numbers; XPM uses the same match duration as the mart's GPM.
+        gpm = player.get("gpm")
+        player["gpm"] = round(gpm) if gpm is not None and isfinite(gpm) else None
+        for field in ("hero_damage", "tower_damage", "healing"):  # stored as floats; shown as whole numbers
+            value = player.get(field)
+            player[field] = round(value) if value is not None and isfinite(value) else None
+        earned_xp = player.pop("total_earned_xp", None)
+        player["xpm"] = (round(float(earned_xp) / (float(duration_s) / 60))
+                         if earned_xp is not None and duration_s and duration_s > 0 else None)
         durations.add(player.pop("duration_s"))
         won = player.pop("won")
         if won is True:
