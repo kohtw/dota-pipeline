@@ -37,6 +37,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW_FERNET_KEY:?add AIRFLOW_FERNET_KEY to .env; generate one with: python3 -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"}'
     STEAM_API_KEY: ${STEAM_API_KEY:-}  # from .env; https://steamcommunity.com/dev/apikey
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}  # from .env; blank disables the webhook
+    # per-run batch sizes and job caps (dags/dota/config.py); raise them in .env on a bigger machine
+    PARSE_BATCH: ${PARSE_BATCH:-}
+    PARALLEL_PARSES: ${PARALLEL_PARSES:-}
+    CLEAN_BATCH: ${CLEAN_BATCH:-}
+    PARALLEL_CLEANS: ${PARALLEL_CLEANS:-}
+    LOAD_BATCH: ${LOAD_BATCH:-}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt:/opt/airflow/dbt:ro  # read by dbt_build

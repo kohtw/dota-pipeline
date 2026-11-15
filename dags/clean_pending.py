@@ -35,11 +35,10 @@ from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_READY, RAW_PARSED
-from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
+from dota.config import BUCKET, CLEAN_BATCH, DOCKER_NETWORK, JOB_MEM_LIMIT, PARALLEL_CLEANS, S3_ENV_VARS
 from dota.jobs import EXIT_CODE_KEY, JobOperator
 
-BATCH = 20  # matches per run; the rest wait for the next trigger
-PARALLEL_CLEANS = 2  # each Spark clean container is heavy, so cap concurrent ones per run
+BATCH = CLEAN_BATCH  # matches per run; the rest wait for the next trigger
 # label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
 MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
 # the DockerOperator runs no Python, so nothing sets match_label in its context; derive its label

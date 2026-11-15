@@ -25,11 +25,10 @@ from airflow.sdk import AssetOrTimeSchedule, CronTriggerTimetable, dag, get_curr
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import RAW_PARSED, REPLAYS_ARRIVED
-from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
+from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, PARALLEL_PARSES, PARSE_BATCH, S3_ENV_VARS
 from dota.jobs import EXIT_CODE_KEY, JobOperator
 
-BATCH = 20  # replays per run; the rest wait for the next run
-PARALLEL_PARSES = 2  # each parser container holds a whole replay in memory
+BATCH = PARSE_BATCH  # replays per run; the rest wait for the next run
 # label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
 MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
 PARSE_LABEL = "{{ task.command[0].rsplit('/', 1)[-1].removesuffix('.dem') }}"  # s3a://raw/replays/{id}.dem

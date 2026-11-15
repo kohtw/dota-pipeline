@@ -26,8 +26,9 @@ from airflow.sdk import (AssetOrTimeSchedule, CronTriggerTimetable, Variable, da
 
 from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, CLEAN_READY
+from dota.config import LOAD_BATCH
 
-BATCH = 20  # matches per run; the rest wait for the next trigger
+BATCH = LOAD_BATCH  # matches per run; the rest wait for the next trigger
 # The one-slot warehouse_write pool runs loads one at a time and never during a dbt build, which
 # compares clean.* with marts built earlier in the same run. This cap only matters if it widens.
 PARALLEL_LOADS = 4
