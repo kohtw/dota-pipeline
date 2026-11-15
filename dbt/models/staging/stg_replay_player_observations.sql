@@ -1,5 +1,11 @@
 -- Staging: one roster player at each ten-second observation time of a replay match.
 -- Select first, validate second: a newer missing value must not fall back to an older good value.
+-- Incremental table, not a view: the grid is expensive (a lateral lookup per player and ten-second
+-- step), and as a view it was recomputed by every test and by team_advantage_timeline on every
+-- dbt build (most of a 28-minute build at ~300 matches). A match's rows depend only on that
+-- match, so each run adds the matches not yet in the table. A match that is reloaded after a
+-- re-clean keeps its old rows until `dbt build --full-refresh`.
+{{ config(materialized='incremental', unique_key='match_id', incremental_strategy='delete+insert') }}
 with grid as (
     select m.match_id, g.observation_time_s
     from {{ source('clean', 'matches') }} m
@@ -9,6 +15,9 @@ with grid as (
              then floor(m.duration_s / 10)::integer * 10 end,
         10
     ) as g(observation_time_s)
+    {% if is_incremental() %}
+    where m.match_id not in (select distinct match_id from {{ this }})
+    {% endif %}
 ),
 
 selected as (

@@ -1,6 +1,17 @@
 -- Mart: one aligned economic observation per replay match and ten-second grid time.
 -- Positive advantage favours Radiant. Incomplete teams keep NULL totals, never partial sums.
-with rosters as (
+-- Incremental by match: a match's rows depend only on that match, so each run adds the matches
+-- not yet in the table (it was the slowest model at ~300 matches). A reloaded match keeps its
+-- old rows until `dbt build --full-refresh`.
+{{ config(materialized='incremental', unique_key='match_id', incremental_strategy='delete+insert') }}
+with new_matches as (
+    select distinct match_id from {{ ref('stg_replay_player_observations') }}
+    {% if is_incremental() %}
+    where match_id not in (select distinct match_id from {{ this }})
+    {% endif %}
+),
+
+rosters as (
     select match_id,
            count(*) = 10 and count(distinct player_slot) = 10
            and count(*) filter (where team = 2) = 5
@@ -10,6 +21,7 @@ with rosters as (
                   or player_slot != (team - 2) * 5 + team_slot
            ) = 0 as roster_valid
     from {{ source('clean', 'players') }}
+    where match_id in (select match_id from new_matches)
     group by match_id
 ),
 
@@ -20,6 +32,7 @@ team_totals as (
                 then sum(net_worth) end as net_worth,
            max(snapshot_age_s) as max_snapshot_age_s
     from {{ ref('stg_replay_player_observations') }}
+    where match_id in (select match_id from new_matches)
     group by match_id, observation_time_s, team
 ),
 
