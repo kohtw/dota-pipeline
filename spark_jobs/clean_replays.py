@@ -522,11 +522,23 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
 
     output, assists = [], []
     for component, budget in zip(components, buckets):
+        allow_same_side = False
+        participant_fallback = False
         primary = _solve(component, budget, teams, window_ticks, max_search_states)
         if not primary:
             # Actual same-team credit is allowed, but must still be uniquely determined.
+            allow_same_side = True
             primary = _solve(component, budget, teams, window_ticks, max_search_states,
                              same_side=True)
+        if len(primary) > 1:
+            # Lists are incomplete for some unique counter-backed assists. Use
+            # them only to resolve ambiguity, and keep the assumption visible.
+            restricted = _solve(
+                component, budget, teams, window_ticks, max_search_states,
+                same_side=allow_same_side, restrict_assist_participants=True)
+            if len(restricted) == 1:
+                primary = restricted
+                participant_fallback = True
         if len(primary) != 1:
             raise CreditError("No consistent credit answer" if not primary else "Ambiguous credit assignment")
         chosen = primary[0]
@@ -534,7 +546,10 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
             status = "exact"
             # Search for an alternative to THIS link, not just the first two
             # alternatives elsewhere in a simultaneous fight.
-            if _solve(component, budget, teams, window_ticks, max_search_states,
+            if participant_fallback:
+                # The participant assumption affects the whole timing component.
+                status = "participant_assumed"
+            elif _solve(component, budget, teams, window_ticks, max_search_states,
                       same_side=True, different_from=chosen, different_index=index):
                 status = "same_side_possible"
             elif _solve(component, budget, teams, window_ticks, max_search_states,
@@ -562,7 +577,8 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
 
 
 def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
-           same_side=False, different_from=None, different_index=None):
+           restrict_assist_participants=False, same_side=False,
+           different_from=None, different_index=None):
     """Search counter-token allocations; distinguish links, not token permutations."""
     remaining = budget.copy()
     answers = set()
@@ -617,9 +633,6 @@ def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
         if enemy_owner:
             killers = [k for k in killers if k == owner]
         for killer in killers:
-            # assist_slots = [s for s in teams if s != killer
-            #                 and available["assists", s]
-            #                 and (same_side or teams[s] != teams[victim])]
             participants = set(event["assist_players"])
 
             assist_slots = [
@@ -627,7 +640,7 @@ def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
                 if s != killer
                 and available["assists", s]
                 and (same_side or teams[s] != teams[victim])
-                and (not restrict_participants or s in participants)
+                and (not restrict_assist_participants or s in participants)
             ]
             for mask in product((False, True), repeat=len(assist_slots)):
                 selected = tuple(s for s, keep in zip(assist_slots, mask) if keep)

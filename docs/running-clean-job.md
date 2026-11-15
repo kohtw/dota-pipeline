@@ -44,6 +44,16 @@ left alone. As with the existing DAG, do not run simultaneous cleaners for the s
 Marker gating prevents consumers from accepting partial writes; it is not a transactional snapshot
 for a reader that already started reading a previous completed generation.
 
+## Run for 10 matches
+
+```bash
+for folder in data/parsed/_complete/match_id=*; do
+  match_id="${folder##*match_id=}"
+  python spark_jobs/clean_replays.py \
+    data/parsed data/output/clean_assist_test "$match_id"
+done
+```
+
 ## Counter-based death and assist credit
 
 `clean_replays.py` is now the single cleaner. `kda_changes` retains the initial counters and
