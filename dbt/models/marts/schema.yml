@@ -53,7 +53,7 @@ models:
         data_tests: [not_null, unique]
 
   - name: damage_by_pair
-    description: "Hero-to-hero damage by attacker, target and source, with the row's share of the attacker's team hero damage. Creep and tower damage is excluded."
+    description: "Hero-to-hero damage by attacker, target and source, with the row's share of the attacker's team enemy-hero damage. Creep and tower damage, friendly fire and self damage are excluded."
     columns:
       - name: pair_key
         data_tests: [not_null, unique]
