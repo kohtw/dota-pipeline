@@ -11,12 +11,16 @@ Airflow API.
   `start_time + duration` from `stg.steam_matches`.
 - **Processing time**: when a stage finished with the match (see the table below).
 - **Lag** of one match at one stage: `stage time - event time`. On the chart it is the vertical
-  gap between the match's point and the diagonal.
-- **Skew** at processing time `p`: `skew(p) = p - frontier(p)`, where `frontier(p)` is the latest
-  event time among the matches already processed by `p`. On the chart it is the horizontal gap
-  between the diagonal and the curve. It is a step function: it grows while nothing finishes and
-  drops when a newer match finishes. Max skew is the largest value just before a match finishes,
-  so it always includes at least one gap between arrivals (30 s at 2 a minute).
+  gap between the match's dot and the diagonal.
+- **Watermark** at processing time `p`: `watermark(p)`, the latest event time among the matches
+  whose stage finished at or before `p`. It never goes back, so on the chart it is a step curve.
+- **Skew** at processing time `p`: `skew(p) = p - watermark(p)`. On the chart it is the
+  horizontal gap between the curve and the diagonal. It grows while nothing newer finishes and
+  drops when a newer match finishes. Max skew is the largest value just before the watermark
+  advances, so it always includes at least one gap between arrivals (30 s at 2 a minute).
+- **Max lag vs the curve.** On a step curve the largest vertical gap equals the max skew. A match
+  that finishes after a later one sits above the curve, so the max lag of single matches can be
+  larger. Both maxima on the chart are the ones in `summary.md`.
 - **Rebasing.** Both axes are seconds since the session start.
   - Burst: the start is `T0`, when the restore run began (`t0` in `_plan.json`, else the earliest
     `scheduled_at - scheduled_offset_s`). A match's simulated event time is
@@ -71,22 +75,40 @@ python3 scripts/latency_report.py summary --sessions live,burst1x,burst2x   # pr
 
 Run extract after the pipeline has drained (dbt has run), or run it again later; it overwrites
 `{session}.csv`. Burst extract also reads a single `restore_log/{run_id}.jsonl` from older runs.
-`chart --annotate-at SECONDS` picks the processing time where the example gaps are drawn
-(default: the median processing time). The gaps are drawn on the first session of each panel.
+`chart --annotate-at SECONDS` draws the lag and skew at that processing time instead of their
+maxima. Each session gets its own arrows in its colour.
 
 ## Reading the chart
 
-- Top row: event time (x) against processing time (y). The dashed line is the ideal, where every
-  match is processed the instant it happens. The thick line per session is the final stage; the
-  faint lines are parsed and cleaned. The further above the diagonal, the larger the lag.
-  Burst axes are in seconds since T0; the live axes are in hours since `--since`, since live
+- Top row: event time (x) against processing time (y). The dashed diagonal is the ideal, where
+  every match is processed the instant it happens. The thick line per session is the processed
+  watermark of the final stage (mart visible when known, else loaded); the thin dashed line is the
+  loaded watermark, so the gap between the two is the time dbt adds. Faint dots are single
+  matches. Matches rejected by clean have no final stage and are left out; the legend counts them.
+  Burst axes are in minutes since T0; the live axes are in hours since `--since`, since live
   replays arrive about a day after the match.
+- The arrows mark the max lag (at its match) and the max skew (at its processing time). With
+  `--annotate-at SECONDS` they show the lag and skew at that processing time instead.
 - A curve that runs parallel to the diagonal means the pipeline keeps up: lag is constant. A
   curve that bends away means a backlog is building: lag grows with each match.
-- Flat steps are batches: several matches finish at the same processing time (one dbt run makes
-  a whole batch visible at once).
+- A tall vertical stretch is a wait: nothing newer finished for that long. A long horizontal step
+  is a batch: one dbt run makes many matches visible at once.
 - Bottom row: lag of the final stage against processing time. Flat or saw-toothed means steady
   state; a rising trend means arrivals outpace the slowest stage.
+
+## Loads and dbt never overlap
+
+`load_pending` (`apply_schema`, `load_one`), `steam_summary_elt` (`load_pages`) and both
+`dbt_build` tasks share the one-slot pool `warehouse_write`. dbt tests such as
+`kda_matches_events` compare live `clean.*` tables with marts built earlier in the same run. When
+a load committed mid-build, the test saw matches the marts did not have, and the build failed: 9
+of them in the 60-match burst, each costing about 4.5 minutes of mart freshness.
+
+The tradeoff: a load that becomes ready during a build waits for it, and loads run one at a time
+(a load takes about 2 s), so `loaded` lag can rise by up to one build. In return every build sees
+a consistent warehouse and none fails for it, so `mart_visible` lag should drop. Loads already
+queued usually go first: `load_one` has a higher priority weight than `build` (Airflow's default
+downstream rule), so a build tends to run between load batches rather than between single loads.
 
 ## Summary columns
 

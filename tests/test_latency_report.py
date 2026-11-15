@@ -64,6 +64,39 @@ def test_on_the_diagonal_lag_and_skew_are_zero():
     assert {round(y - x, 3) for x, y in pts} == {0.0}
 
 
+def test_watermark_steps_at_completions_and_never_drops():
+    # events 0, 30, 60, 90; the one at 30 finishes last, after 60 and 90
+    pts = [(0.0, 10.0), (60.0, 100.0), (90.0, 120.0), (30.0, 150.0)]
+    steps = lr.watermark(pts)
+    assert steps == [(10.0, 0.0), (100.0, 60.0), (120.0, 90.0), (150.0, 90.0)]
+    assert [p for p, _ in steps] == sorted({y for _, y in pts})  # one step per completion
+    assert all(a[1] <= b[1] for a, b in zip(steps, steps[1:]))  # monotonic
+    assert all(w == lr.frontier(pts, p) for p, w in steps)
+    assert lr.watermark([]) == []
+
+
+def test_watermark_path_climbs_then_steps_right():
+    steps = lr.watermark([(0.0, 10.0), (60.0, 100.0), (90.0, 120.0), (30.0, 150.0)])
+    # x = watermark (event), y = processing; the late event at 30 adds height, not a step
+    assert lr.watermark_path(steps) == [(0.0, 10.0), (0.0, 100.0), (60.0, 100.0), (60.0, 120.0),
+                                        (90.0, 120.0), (90.0, 150.0)]
+    xs, ys = zip(*lr.watermark_path(steps))
+    assert list(xs) == sorted(xs) and list(ys) == sorted(ys)
+    # a batch finishing at once is one step
+    assert lr.watermark_path(lr.watermark([(0.0, 50.0), (30.0, 50.0)])) == [(30.0, 50.0)]
+
+
+def test_max_skew_and_max_lag_from_the_watermark():
+    pts = [(0.0, 10.0), (60.0, 100.0), (90.0, 120.0), (30.0, 150.0)]
+    # just before p=100 the watermark is still 0; the late match at 30 has the largest lag
+    assert lr.max_skew_point(pts) == (100.0, 0.0, 100.0)
+    assert lr.max_skew(pts) == 100.0
+    assert lr.max_lag_point(pts) == (30.0, 150.0, 120.0)
+    # the curve's largest vertical gap is the max skew; the out-of-order match lags more
+    assert lr.max_lag_point(pts)[2] > lr.max_skew(pts)
+    assert lr.max_skew_point([]) is None and lr.max_lag_point([]) is None
+
+
 def test_percentile_and_rate():
     assert lr.percentile([], 50) is None
     assert lr.percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.0
@@ -338,13 +371,24 @@ def test_summary_skips_mart_without_airflow_and_renders_markdown():
 
 # ---------- chart and CLI ----------
 
-def test_annotation_picks_gaps_at_processing_time():
+def test_annotation_defaults_to_the_maxima_and_takes_a_processing_time():
     pts = [(0.0, 10.0), (30.0, 100.0), (60.0, 110.0)]
     a = lr.annotation(pts, at=105)
     assert a["frontier"] == 30.0 and a["skew"] == 75.0
     assert (a["lag_x"], a["lag_y"], a["lag"]) == (30.0, 100.0, 70.0)
-    assert lr.annotation(pts)["p"] == 100.0
+    m = lr.annotation(pts)
+    assert (m["p"], m["frontier"], m["skew"]) == (100.0, 0.0, 100.0) and m["skew"] == lr.max_skew(pts)
+    assert (m["lag_x"], m["lag_y"], m["lag"]) == (30.0, 100.0, 70.0)
     assert lr.annotation([]) is None
+
+
+def test_chart_maxima_match_the_summary():
+    rows = burst_session("b1", "burst_1x.json")
+    summary = {s["stage"]: s for s in lr.summarize(rows)}
+    final = summary["mart_visible"] if all(r.get("mart_visible_at") for r in rows if r.get("loaded_at")) \
+        else summary["loaded"]
+    a = lr.annotation(lr.final_points(rows))
+    assert a["lag"] == final["max_lag_s"] and a["skew"] == final["max_skew_s"]
 
 
 def test_chart_writes_png_and_html(tmp_path):
@@ -357,7 +401,7 @@ def test_chart_writes_png_and_html(tmp_path):
     assert only == [tmp_path / "burst.png"] and only[0].stat().st_size > 0
 
 
-def test_live_top_panel_is_in_hours_and_burst_in_seconds():
+def test_top_panel_draws_watermarks_live_in_hours_and_burst_in_minutes():
     import matplotlib.pyplot as plt
 
     sessions = {"live": live_session(), "b1": burst_session("b1", "burst_1x.json")}
@@ -366,23 +410,40 @@ def test_live_top_panel_is_in_hours_and_burst_in_seconds():
     fig = lr.chart_figure(sessions)
     burst_ax, live_ax = fig.axes[0], fig.axes[1]  # top row; the lag row follows
     assert "h since --since" in live_ax.get_xlabel() and "h since --since" in live_ax.get_ylabel()
-    assert "s since T0" in burst_ax.get_xlabel() and "s since T0" in burst_ax.get_ylabel()
-    live_final = lr.final_points([r for r in sessions["live"] if r["lane"] == "replay"])
-    line = next(l for l in live_ax.get_lines() if l.get_label() == "live")
-    assert list(line.get_ydata()) == pytest.approx([y / 3600 for _, y in live_final])
-    burst_final = lr.final_points(sessions["b1"])
-    line = next(l for l in burst_ax.get_lines() if l.get_label() == "b1")
-    assert list(line.get_ydata()) == pytest.approx([y for _, y in burst_final])
-    # the lag panel below stays in seconds
+    assert "min since T0" in burst_ax.get_xlabel() and "min since T0" in burst_ax.get_ylabel()
+
+    def line(ax, label):
+        return next(l for l in ax.get_lines() if l.get_label() == label)
+
+    live = lr.lane_curves([r for r in sessions["live"] if r["lane"] == "replay"])
+    wm = line(live_ax, f"live: {live['stage']} watermark")
+    assert list(wm.get_ydata()) == pytest.approx([y / 3600 for _, y in live["watermark"]])
+    b1 = lr.lane_curves(sessions["b1"])
+    wm = line(burst_ax, f"b1: {b1['stage']} watermark")
+    assert list(wm.get_xdata()) == pytest.approx([x / 60 for x, _ in b1["watermark"]])
+    assert list(wm.get_ydata()) == pytest.approx([y / 60 for _, y in b1["watermark"]])
+    assert all(a <= b for a, b in zip(wm.get_ydata(), wm.get_ydata()[1:]))  # monotonic, no zig-zag
+    dots = next(l for l in burst_ax.get_lines() if l.get_label().startswith("b1: matches"))
+    assert len(dots.get_xdata()) == len(lr.final_points(sessions["b1"]))
+    assert all(not r.get("final_at") for r in sessions["b1"] if r["rejected"])  # rejected: no dot
+    # the lag panel below stays in seconds for live
     lag_line = next(l for l in fig.axes[3].get_lines() if l.get_label() == "live")
     assert max(lag_line.get_ydata()) > 86400
     plt.close(fig)
 
     html = lr.html_figure(sessions, style, groups)
-    live_trace = next(t for t in html.data if t.name == "live" and t.xaxis == "x2")
-    assert list(live_trace.y) == pytest.approx([y / 3600 for _, y in live_final])
+    live_trace = next(t for t in html.data if t.name == f"live: {live['stage']} watermark" and t.xaxis == "x2")
+    assert list(live_trace.y) == pytest.approx([y / 3600 for _, y in live["watermark"]])
     assert html.layout.yaxis2.title.text == "processing time, h"
-    assert html.layout.yaxis.title.text == "processing time, s"
+    assert html.layout.yaxis.title.text == "processing time, min"
+
+
+def test_loaded_watermark_is_drawn_only_when_dbt_made_matches_visible():
+    rows = burst_session("b1", "burst_1x.json")
+    assert lr.lane_curves(rows)["loaded"]
+    no_dbt = [lr.finish_row({**r, "mart_visible_at": None}) for r in rows]
+    curves = lr.lane_curves(no_dbt)
+    assert curves["loaded"] == [] and curves["stage"] == "loaded"
 
 
 def test_single_column_footer_stays_inside_the_figure():

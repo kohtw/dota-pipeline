@@ -2,7 +2,7 @@
 Event time vs processing time for the demo sessions (docs/latency-report.md).
 
   extract  one CSV per session: when each match happened and when each stage finished with it
-  chart    event time vs processing time (ideal diagonal, one curve per session) and lag over time
+  chart    event time vs processing time (ideal diagonal, a watermark curve per session) and lag over time
   summary  per session and stage: count, p50/p95/max lag, max skew, throughput, backlog
 
 Reads Garage (S3_ENDPOINT / S3_ACCESS_KEY / S3_SECRET_KEY), the warehouse (WAREHOUSE_*, host port
@@ -486,21 +486,59 @@ def frontier(pts: list[tuple[float, float]], p: float) -> float | None:
     return max(done) if done else None
 
 
-def skew_curve(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """skew(p) = p - frontier(p), sampled just before and just after each processing instant
-    (the frontier is a step function, so this is where the extremes are)."""
-    curve, front = [], None
+def watermark(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """The processed watermark as (p, w) at each distinct processing time p: w = frontier(p), the
+    latest event time among the points processed at or before p. Both columns never decrease."""
+    steps, w = [], None
     for y in sorted({y for _, y in pts}):
-        if front is not None:
-            curve.append((y, round(y - front, 3)))
-        front = max([x for x, yy in pts if yy == y] + ([front] if front is not None else []))
-        curve.append((y, round(y - front, 3)))
+        w = max([x for x, yy in pts if yy == y] + ([w] if w is not None else []))
+        steps.append((y, w))
+    return steps
+
+
+def watermark_path(steps: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Plot vertices (event x, processing y) of the watermark step curve: it climbs straight up
+    while nothing newer finishes and steps right at the completion that raises it."""
+    path: list[tuple[float, float]] = []
+    for i, (p, w) in enumerate(steps):
+        if i:
+            path.append((steps[i - 1][1], p))
+        path.append((w, p))
+    return [q for i, q in enumerate(path) if not i or q != path[i - 1]]
+
+
+def skew_curve(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """skew(p) = p - watermark(p), sampled just before and just after each processing instant
+    (the watermark is a step function, so this is where the extremes are)."""
+    curve, steps = [], watermark(pts)
+    for i, (p, w) in enumerate(steps):
+        if i:
+            curve.append((p, round(p - steps[i - 1][1], 3)))
+        curve.append((p, round(p - w, 3)))
     return curve
 
 
 def max_skew(pts: list[tuple[float, float]]) -> float | None:
     curve = skew_curve(pts)
     return max(s for _, s in curve) if curve else None
+
+
+def max_skew_point(pts: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+    """(p, watermark just before p, skew) where skew(p) is largest; the first such p on ties."""
+    best, steps = None, watermark(pts)
+    for i, (p, w) in enumerate(steps):
+        for front in ([steps[i - 1][1]] if i else []) + [w]:
+            if best is None or p - front > best[2]:
+                best = (p, front, round(p - front, 3))
+    return best
+
+
+def max_lag_point(pts: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+    """(event x, processing y, lag) of the match with the largest lag y - x."""
+    if not pts:
+        return None
+    x, y = max(pts, key=lambda q: (q[1] - q[0], -q[0]))
+    return x, y, round(y - x, 3)
 
 
 def rate_per_min(times: list[dt.datetime]) -> float | None:
@@ -566,16 +604,20 @@ def markdown(summary: list[dict]) -> str:
 COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")
 MARKERS = ("o", "s", "^", "D", "v", "P", "X")
 INK, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
-EARLIER = ("parsed_at", "cleaned_at")
 # top-panel axis unit per group: (seconds per unit, unit). Live replays sit about a day after the
 # match ends, so seconds there run into six figures; hours read at a glance.
-TOP_UNITS = {"burst": (1, "s"), "live": (3600, "h")}
+TOP_UNITS = {"burst": (60, "min"), "live": (3600, "h")}
 # lag-panel unit per group. A burst's lag is minutes; in seconds the tick labels collapse to an
 # offset such as "+3.559e4". Live stays in seconds on a log scale (replays a day, Steam minutes).
 LAG_UNITS = {"burst": (60, "min"), "live": (1, "s")}
-FOOTER = ("Final stage = mart visible (dbt) when known, else loaded. Faint: parsed, cleaned. "
-          "Lag = vertical gap to the diagonal, skew = horizontal gap.")
+FOOTER = ("Thick line: processed watermark, the latest event time among matches whose final stage "
+          "(mart visible when known, else loaded) finished by then. Dashed: loaded watermark; its gap to "
+          "the thick line is dbt. Dots: single matches (rejected ones not drawn). Lag = processing - event "
+          "per match (dot to diagonal, vertical); skew(p) = p - watermark(p) (curve to diagonal, "
+          "horizontal). Both maxima equal summary.md. A match that finishes after a later one sits above "
+          "the curve, so max lag can exceed the curve's own vertical gap.")
 FOOTER_CHARS_PER_COL = 100  # characters of 8 pt footer text that fit across one 7-inch column
+STAGE_NAMES = {"mart_visible": "mart visible", "loaded": "loaded"}
 
 
 def scaled(pts: list[tuple[float, float]], per: float) -> list[tuple[float, float]]:
@@ -594,17 +636,37 @@ def final_points(rows: list[dict], with_ids: bool = False) -> list[tuple]:
     return pts if with_ids else [(x, y) for x, y, _ in pts]
 
 
+def final_stage_name(rows: list[dict]) -> str:
+    stages = {r.get("final_stage") for r in rows if r.get("final_stage")}
+    return STAGE_NAMES.get(*stages) if len(stages) == 1 else "mart visible, else loaded"
+
+
+def lane_curves(rows: list[dict]) -> dict:
+    """What the top panel draws for one session lane: the final-stage points, their watermark
+    path, and the loaded watermark path when dbt made any match visible later than its load."""
+    pts = final_points(rows)
+    has_mart = any(r.get("final_stage") == "mart_visible" for r in rows)
+    loaded = sorted(points(rows, "loaded_at")) if has_mart else []
+    return {"points": pts, "watermark": watermark_path(watermark(pts)),
+            "loaded": watermark_path(watermark(loaded)), "stage": final_stage_name(rows),
+            "rejected": sum(bool(r.get("rejected")) for r in rows)}
+
+
 def annotation(pts: list[tuple[float, float]], at: float | None = None) -> dict | None:
-    """The example gaps drawn on the chart at processing time p (default: median processing
-    time): the lag of the event processed nearest p, and the skew p - frontier(p)."""
+    """The gaps drawn on the chart. By default the maxima, as in summary.md: the match with the
+    largest lag and the processing time p where p - watermark(p) peaks. With `at`, the lag of the
+    event processed nearest p = at and the skew at that p instead."""
     if not pts:
         return None
-    ys = sorted(y for _, y in pts)
-    p = at if at is not None else ys[(len(ys) - 1) // 2]
-    x, y = min(pts, key=lambda q: (abs(q[1] - p), q[0]))
-    front = frontier(pts, p)
-    return {"p": p, "lag_x": x, "lag_y": y, "lag": round(y - x, 3), "frontier": front,
-            "skew": None if front is None else round(p - front, 3)}
+    if at is None:
+        lag_x, lag_y, lag = max_lag_point(pts)
+        p, front, skew = max_skew_point(pts)
+    else:
+        p = at
+        lag_x, lag_y = min(pts, key=lambda q: (abs(q[1] - p), q[0]))
+        lag, front = round(lag_y - lag_x, 3), frontier(pts, p)
+        skew = None if front is None else round(p - front, 3)
+    return {"p": p, "lag_x": lag_x, "lag_y": lag_y, "lag": lag, "frontier": front, "skew": skew}
 
 
 def chart_style(sessions: dict[str, list[dict]]) -> tuple[dict, list[str]]:
@@ -630,6 +692,25 @@ def chart(sessions: dict[str, list[dict]], out: Path, annotate_at: float | None 
     return written
 
 
+def draw_gaps(ax, a: dict, per: float, color: str, name: str | None, span: tuple[float, float]) -> None:
+    """Max lag (vertical, at the match) and max skew (horizontal, at the processing time)."""
+    gap = dict(arrowstyle="<->", color=color, lw=1.4, shrinkA=0, shrinkB=0)
+    box = dict(boxstyle="round,pad=0.2", fc=SURFACE, ec="none", alpha=0.9)
+    who = f"{name} " if name else ""
+    lag_x, lag_y, p = a["lag_x"] / per, a["lag_y"] / per, a["p"] / per
+    ax.annotate("", xy=(lag_x, lag_y), xytext=(lag_x, lag_x), arrowprops=gap, zorder=5)
+    ax.plot([lag_x], [lag_y], marker="o", ms=7, mfc=color, mec=INK, mew=1, ls="none", zorder=6)
+    # just above the match: it finished after everything near it, so the space there is usually free
+    ax.text(lag_x, lag_y + 0.012 * (span[1] - span[0]), f"{who}max lag {fmt(a['lag'], 's')}", color=INK,
+            fontsize=9, ha="center", va="bottom", bbox=box, zorder=6)
+    if a["frontier"] is not None and a["skew"]:
+        front = a["frontier"] / per
+        ax.annotate("", xy=(front, p), xytext=(p, p), arrowprops=gap, zorder=5)
+        # below the arrow nothing is drawn: matches done before p have event times <= the watermark
+        ax.text((front + p) / 2, p - 0.015 * (span[1] - span[0]), f"{who}max skew {fmt(a['skew'], 's')}",
+                color=INK, fontsize=9, ha="center", va="top", bbox=box, zorder=6)
+
+
 def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = None):
     """The matplotlib figure: per group, event vs processing time on top, lag over time below."""
     import matplotlib
@@ -639,12 +720,14 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
     from matplotlib.ticker import ScalarFormatter
 
     style, groups = chart_style(sessions)
-    fig, axes = plt.subplots(2, len(groups), figsize=(7 * len(groups), 11), squeeze=False, facecolor=SURFACE)
+    fig, axes = plt.subplots(2, len(groups), figsize=(7 * len(groups), 12), squeeze=False, facecolor=SURFACE,
+                             gridspec_kw={"height_ratios": (3, 2)})
     for col, group in enumerate(groups):
         ax, lag_ax = axes[0][col], axes[1][col]
         per, unit = TOP_UNITS[group]
         lag_per, lag_unit = LAG_UNITS[group]
-        lo, hi, annotated = math.inf, -math.inf, False
+        lo, hi, gaps = math.inf, -math.inf, []
+        named = sum(any(r["kind"] == group for r in rows) for rows in sessions.values()) > 1
         for name, rows in sessions.items():
             rows = [r for r in rows if r["kind"] == group]
             color, marker = style[name]
@@ -652,33 +735,34 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
                 lane_rows = [r for r in rows if r["lane"] == lane]
                 label = name if lane == "replay" else f"{name} ({lane})"
                 lane_marker = marker if lane == "replay" else "x"
-                for stage in EARLIER:
-                    if pts := sorted(points(lane_rows, stage)):
-                        ax.plot(*zip(*scaled(pts, per)), color=color, alpha=0.25, lw=1, marker=lane_marker, ms=4)
-                pts = final_points(lane_rows)
+                c = lane_curves(lane_rows)
+                pts = c["points"]
                 if not pts:
                     continue
-                top = scaled(pts, per)
-                ax.plot(*zip(*top), color=color, lw=2, marker=lane_marker, ms=6, label=label)
-                lo, hi = min(lo, *(min(p) for p in top)), max(hi, *(max(p) for p in top))
+                rejected = f", {c['rejected']} rejected not drawn" if c["rejected"] else ""
+                ax.plot(*zip(*scaled(pts, per)), ls="none", color=color, alpha=0.3, marker=lane_marker, ms=4,
+                        mew=0, label=f"{label}: matches (n={len(pts)}{rejected})", zorder=2)
+                if c["loaded"]:
+                    ax.plot(*zip(*scaled(c["loaded"], per)), color=color, alpha=0.55, lw=1.1, ls=(0, (4, 2)),
+                            label=f"{label}: loaded watermark", zorder=3)
+                ax.plot(*zip(*scaled(c["watermark"], per)), color=color, lw=2.2,
+                        label=f"{label}: {c['stage']} watermark", zorder=4)
+                top = scaled(pts + c["loaded"], per)
+                lo, hi = min(lo, *(min(q) for q in top)), max(hi, *(max(q) for q in top))
                 by_y = sorted(pts, key=lambda q: q[1])
                 lag_ax.plot([y / lag_per for _, y in by_y], [(y - x) / lag_per for x, y in by_y], color=color,
-                            lw=2, marker=lane_marker, ms=6, label=label)
-                if not annotated and lane == "replay" and (a := annotation(pts, annotate_at)):
-                    annotated = True
-                    gap = dict(arrowstyle="<->", color=INK, lw=1.2)
-                    lag_x, lag_y, p = a["lag_x"] / per, a["lag_y"] / per, a["p"] / per
-                    ax.annotate("", xy=(lag_x, lag_y), xytext=(lag_x, lag_x), arrowprops=gap)
-                    ax.text(lag_x, (lag_x + lag_y) / 2, f"  lag {fmt(a['lag'], 's')}",
-                            color=INK, fontsize=9, va="center")
-                    if a["frontier"] is not None and a["skew"] > 0:
-                        front = a["frontier"] / per
-                        ax.annotate("", xy=(front, p), xytext=(p, p), arrowprops=gap)
-                        ax.text((front + p) / 2, p, f"skew {fmt(a['skew'], 's')}\n",
-                                color=INK, fontsize=9, ha="center", va="bottom")
+                            lw=1.5, marker=lane_marker, ms=4, label=label)
+                if lane == "replay" and (a := annotation(pts, annotate_at)):
+                    gaps.append((a, color, name if named else None))
         if lo < hi:
-            pad = (hi - lo) * 0.05
-            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=MUTED, ls="--", lw=1, label="ideal (y = x)")
+            pad = (hi - lo) * 0.04
+            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=MUTED, ls="--", lw=1, label="ideal (y = x)",
+                    zorder=1)
+            if group == "burst":  # same span on both axes, so the diagonal is 45 degrees
+                ax.set_xlim(lo - pad, hi + 2 * pad)
+                ax.set_ylim(lo - pad, hi + 2 * pad)  # room for the max lag label above the top match
+        for a, color, name in gaps:
+            draw_gaps(ax, a, per, color, name, ax.get_xlim())
         title = "Burst sessions" if group == "burst" else "Live session"
         start = "T0 (restore start)" if group == "burst" else "--since"
         ax.set_title(f"{title}: event time vs processing time", color=INK, loc="left")
@@ -699,12 +783,15 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
             a.tick_params(colors=MUTED)
             for spine in a.spines.values():
                 spine.set_color(GRID)
-            if a.get_legend_handles_labels()[0]:
-                a.legend(frameon=False, fontsize=9)
+        # nothing is processed before it happens, so the area below the diagonal stays empty
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(frameon=False, fontsize=8.5, loc="lower right")
+        if lag_ax.get_legend_handles_labels()[0]:
+            lag_ax.legend(frameon=False, fontsize=9)
     # one column is too narrow for the footer on one line, so wrap it and leave room for every line
     footer = textwrap.wrap(FOOTER, FOOTER_CHARS_PER_COL * len(groups))
     fig.text(0.01, 0.005, "\n".join(footer), color=MUTED, fontsize=8, va="bottom")
-    fig.tight_layout(rect=(0, 0.005 + 0.015 * len(footer), 1, 1))
+    fig.tight_layout(rect=(0, 0.005 + 0.013 * len(footer), 1, 1))
     return fig
 
 
@@ -723,6 +810,8 @@ def html_figure(sessions, style, groups):
     fig = make_subplots(rows=2, cols=len(groups), subplot_titles=titles)
     for col, group in enumerate(groups, start=1):
         per, unit = TOP_UNITS[group]
+        lag_per, lag_unit = LAG_UNITS[group]
+        num = ".0f" if per == 1 else ".2f"
         lo, hi = math.inf, -math.inf
         for name, rows in sessions.items():
             color, marker = style[name]
@@ -731,32 +820,50 @@ def html_figure(sessions, style, groups):
                 triples = final_points(lane_rows, with_ids=True)
                 if not triples:
                     continue
+                c = lane_curves(lane_rows)
                 pts, ids = [(x, y) for x, y, _ in triples], [m for _, _, m in triples]
                 label = name if lane == "replay" else f"{name} ({lane})"
                 sym = plotly_markers[marker] if lane == "replay" else "x"
                 top = scaled(pts, per)
-                num = ".0f" if per == 1 else ".2f"
-                fig.add_trace(go.Scatter(x=[p[0] for p in top], y=[p[1] for p in top], mode="lines+markers",
-                                         name=label, legendgroup=label, text=ids,
-                                         line=dict(color=color, width=2), marker=dict(symbol=sym),
-                                         hovertemplate=f"match %{{text}}<br>event %{{x:{num}}}{unit}"
-                                                       f"<br>processed %{{y:{num}}}{unit}"),
+                fig.add_trace(go.Scatter(x=[p[0] for p in top], y=[p[1] for p in top], mode="markers",
+                                         name=f"{label}: matches", legendgroup=label, text=ids,
+                                         marker=dict(symbol=sym, color=color, opacity=0.35),
+                                         hovertemplate=f"match %{{text}}<br>event %{{x:{num}}} {unit}"
+                                                       f"<br>processed %{{y:{num}}} {unit}"),
+                              row=1, col=col)
+                if c["loaded"]:
+                    path = scaled(c["loaded"], per)
+                    fig.add_trace(go.Scatter(x=[p[0] for p in path], y=[p[1] for p in path], mode="lines",
+                                             name=f"{label}: loaded watermark", legendgroup=label,
+                                             line=dict(color=color, width=1, dash="dash"), opacity=0.6,
+                                             hovertemplate=f"loaded watermark %{{x:{num}}} {unit}"
+                                                           f"<br>at %{{y:{num}}} {unit}"),
+                                  row=1, col=col)
+                path = scaled(c["watermark"], per)
+                fig.add_trace(go.Scatter(x=[p[0] for p in path], y=[p[1] for p in path], mode="lines",
+                                         name=f"{label}: {c['stage']} watermark", legendgroup=label,
+                                         line=dict(color=color, width=2.5),
+                                         hovertemplate=f"watermark %{{x:{num}}} {unit}<br>at %{{y:{num}}} {unit}"),
                               row=1, col=col)
                 by_y = sorted(pts, key=lambda q: q[1])
-                fig.add_trace(go.Scatter(x=[y for _, y in by_y], y=[y - x for x, y in by_y], mode="lines+markers",
-                                         name=label, legendgroup=label, showlegend=False,
-                                         line=dict(color=color, width=2), marker=dict(symbol=sym),
-                                         hovertemplate="processed %{x:.0f}s<br>lag %{y:.0f}s"), row=2, col=col)
-                lo, hi = min(lo, *(min(p) for p in top)), max(hi, *(max(p) for p in top))
+                fig.add_trace(go.Scatter(x=[y / lag_per for _, y in by_y], y=[(y - x) / lag_per for x, y in by_y],
+                                         mode="lines+markers", name=label, legendgroup=label, showlegend=False,
+                                         line=dict(color=color, width=1.5), marker=dict(symbol=sym, size=5),
+                                         hovertemplate=f"processed %{{x:.1f}} {lag_unit}"
+                                                       f"<br>lag %{{y:.1f}} {lag_unit}"), row=2, col=col)
+                all_top = scaled(pts + c["loaded"], per)
+                lo, hi = min(lo, *(min(p) for p in all_top)), max(hi, *(max(p) for p in all_top))
         if lo < hi:
             fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="ideal (y = x)",
                                      showlegend=col == 1, line=dict(color=MUTED, dash="dash", width=1)),
                           row=1, col=col)
         fig.update_xaxes(title_text=f"event time, {unit}", row=1, col=col)
         fig.update_yaxes(title_text=f"processing time, {unit}", row=1, col=col)
+        fig.update_xaxes(title_text=f"processing time, {lag_unit}", row=2, col=col)
+        fig.update_yaxes(title_text=f"lag, {lag_unit}", row=2, col=col)
         if group == "live":
             fig.update_yaxes(type="log", row=2, col=col)
-    fig.update_layout(height=900, template="plotly_white")
+    fig.update_layout(height=1000, template="plotly_white")
     return fig
 
 
@@ -847,7 +954,7 @@ def main(argv: list[str] | None = None) -> None:
         p.set_defaults(func=func)
     ch = sub.choices["chart"]
     ch.add_argument("--out", type=Path, help="PNG path, default {out-dir}/chart.png")
-    ch.add_argument("--annotate-at", type=float, help="processing time (s since start) for the example gaps")
+    ch.add_argument("--annotate-at", type=float, help="processing time (s since start) to draw the lag and skew at, instead of their maxima")
     ch.add_argument("--no-html", action="store_true")
 
     args = ap.parse_args(argv)
