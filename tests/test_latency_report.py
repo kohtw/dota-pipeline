@@ -244,6 +244,18 @@ def test_burst_rows_fall_back_to_airflow_task_end():
     assert row["final_stage"] is None
 
 
+def test_burst_arrival_is_never_before_the_release():
+    # real Garage run: LastModified of a multipart replay is when its upload began, 0.3 s
+    # before the release log saw the upload complete
+    plan = {"t0": lr.iso(T0)}
+    log = [{"match_id": 1, "scheduled_offset_s": 0, "status": "released", "released_at": lr.iso(at(2.6))},
+           {"match_id": 2, "scheduled_offset_s": 4, "status": "released", "released_at": lr.iso(at(6))}]
+    stages = {1: {"arrived_at": at(2.3)}, 2: {"arrived_at": at(7)}}
+    rows = {r["match_id"]: r for r in lr.burst_rows("s", "r", plan, log, stages)}
+    assert rows[1]["arrived_at"] == at(2.6) and rows[1]["lag_arrived_s"] == rows[1]["lag_released_s"] == 2.6
+    assert rows[2]["arrived_at"] == at(7)  # a later LastModified is kept
+
+
 def test_live_rows_have_replay_and_steam_lanes():
     f = fixture("live.json")
     rows = live_session()

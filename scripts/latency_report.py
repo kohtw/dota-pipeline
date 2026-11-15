@@ -381,7 +381,9 @@ def burst_rows(session: str, run_id: str, plan: dict | None, log_rows: list[dict
             "origin": t0, "event_time": to_utc(r.get("end_time")),
             "sim_event_time": t0 + dt.timedelta(seconds=float(r.get("scheduled_offset_s") or 0)),
             "released_at": released,
-            "arrived_at": st.get("arrived_at") if released else None,
+            # Garage stamps a multipart object with the time its upload began, but the replay only
+            # appears in replays/ when the upload completes, which is released_at
+            "arrived_at": max(filter(None, (st.get("arrived_at"), released))) if released else None,
             **{k: ta.get(k) for k in ("parse_started_at", "clean_started_at", "load_started_at")},
             **{k: st.get(k) or ta.get(k) for k in ("parsed_at", "cleaned_at", "loaded_at")},
         }

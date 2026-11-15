@@ -31,7 +31,7 @@ Airflow API.
 | Column | Source |
 |---|---|
 | `released_at` | burst only: restore log row (`cold/restore_log/{run_id}/{match_id}.json`) |
-| `arrived_at` | `LastModified` of `replays/{match_id}.dem` |
+| `arrived_at` | `LastModified` of `replays/{match_id}.dem`. Garage stamps a multipart object with the time its upload began, so for a burst it is raised to `released_at` when earlier; for live it is the upload start |
 | `parsed_at` | `parsed_at` column of `parsed/_complete/match_id={id}/` Parquet; newest part file's `LastModified` with `--no-parquet` |
 | `cleaned_at` | `LastModified` of `clean/_complete/match_id={id}/_SUCCESS` |
 | `rejected` | any object under `clean/_rejected/match_id={id}/` |
