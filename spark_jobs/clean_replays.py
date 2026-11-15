@@ -230,6 +230,7 @@ def _build_replay_tables(raw):
         "CDOTA_Unit_Hero_Beastmaster_Hawk",
     ]
     heroes = raw["heroes"].filter(~col("class").isin(*summon_classes))
+    
     result.note("unknown_replication_marker", heroes.filter(col("m_hReplicatingOtherHeroModel").isNull()))
     real = heroes.filter(col("m_hReplicatingOtherHeroModel") == NULL_HANDLE)
     valid_hero = (col("m_iPlayerID").between(0, 18) & ((col("m_iPlayerID") % 2) == 0))
