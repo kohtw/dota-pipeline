@@ -84,6 +84,7 @@ def main() -> None:
     try:
         for path in (
             ROOT / "warehouse/init/04_steam_tables.sql",
+            ROOT / "warehouse/init/06_constants_tables.sql",
             ROOT / "warehouse/fixtures/sample_steam.sql",
         ):
             compose(
@@ -104,7 +105,7 @@ def main() -> None:
                 "hero_matchup_fixture_tests": args.matchup_tests,
             }),
         )
-        compose(*dbt, "seed", *settings, "--select", "dim_heroes")
+        compose(*dbt, "build", *settings, "--select", "+dim_heroes")
         compose(*dbt, "build", *settings, "--select", "stg_steam_ranked+")
         if args.matchup_tests:
             check_matchup_failures(database, dbt, settings)

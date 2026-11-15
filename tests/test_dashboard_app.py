@@ -1,6 +1,7 @@
 """Exercise warehouse startup, routing and player views without a live database."""
 
 import json
+from importlib import import_module
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -54,6 +55,10 @@ def dashboard_app(dashboard_database, warehouse_config, scoreboard_cursor, monke
             ]],
         5: [dict(inventory_slot=2, location="main", item_name="item_boots", item_display_name="Boots of Speed")],
     }))
+    # The overview's match story and damage taken read the event marts; keep them offline and empty here.
+    events = import_module("events_db")
+    for name in ("load_match_deaths", "load_match_fights", "load_damage_timeline"):
+        monkeypatch.setattr(events, name, MagicMock(return_value=[]))
     return testing.AppTest.from_file(str(APP_PATH))
 
 
@@ -566,3 +571,32 @@ def test_malformed_search_can_be_corrected_without_leaving_the_page(dashboard_ap
     assert not dashboard_app.error
     assert dashboard_app.title[0].value == "Match overview"
     assert dashboard_app.query_params["match_id"] == "9000000001"
+
+
+def test_item_tiles_fill_six_slots_with_initials_and_names(dashboard_database):
+    components = import_module("components")
+    html = components.item_tiles(["Black King Bar", "Blink Dagger", "Eye of Skadi", "Butterfly", "<b>"])
+    assert html.count('class="item"') == 5 and html.count('class="item empty"') == 1
+    assert 'title="Black King Bar"' in html and ">BKB<" in html and ">ES<" in html and ">Bu<" in html
+    assert "<b>" not in html and "&lt;b&gt;" in html
+    assert html.count('class="item empty"') == 1
+    assert components.item_tiles([]).count('class="item empty"') == 6
+    assert "Unavailable" in components.item_tiles(None)
+
+
+def test_scoreboard_shows_items_beside_the_hero_and_the_new_stats(dashboard_app):
+    events = import_module("events_db")
+    events.load_damage_timeline.return_value = [
+        dict(player_slot=0, minute=minute, damage_from_heroes=100) for minute in range(3)]
+    app = dashboard_app
+    app.query_params["match_id"] = "9000000001"
+    app.run(timeout=15)
+    assert not app.exception
+    board = next(element.proto.body for element in app.get("html") if "dota-scoreboard" in element.proto.body
+                 and "Anti-Mage" in element.proto.body)
+    headers = board.split("<thead>")[1].split("</thead>")[0]
+    assert headers.index(">Hero<") < headers.index(">Items<") < headers.index(">Lvl<")
+    for label in ("GPM", "XPM", "Hero dmg", "Dmg taken", "Tower dmg", "Heal"):
+        assert f">{label}<" in headers
+    antimage = board.split("Anti-Mage")[1].split("</tr>")[0]
+    assert ">BD<" in antimage and ">450<" in antimage and ">600<" in antimage and ">300<" in antimage

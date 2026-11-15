@@ -4,6 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY *.py ./
+COPY assets ./assets
 RUN useradd --create-home dashboard
 USER dashboard
 EXPOSE 8501

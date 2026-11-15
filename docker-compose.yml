@@ -40,7 +40,7 @@ x-airflow-common: &airflow-common
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt:/opt/airflow/dbt:ro  # read by dbt_build
-    - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL applied by dbt_build and steam_summary_elt
+    - ./warehouse/init:/opt/airflow/warehouse/init:ro  # DDL applied by dbt_build, steam_summary_elt and refresh_constants
     - dota-data:/data
   depends_on: &airflow-depends
     airflow-db:

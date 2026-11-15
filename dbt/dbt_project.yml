@@ -15,3 +15,5 @@ models:
       +materialized: table
     staging:
       +materialized: view     # no +schema: lands in the target schema, like the seeds
+    dims:
+      +materialized: table    # no +schema: the target schema, where the dim_* seeds used to be

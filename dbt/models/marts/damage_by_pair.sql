@@ -1,6 +1,6 @@
 -- Mart: hero-to-hero damage by attacker, target and damage source.
--- Creeps and towers are left out: they have no attacker_slot / target_slot.
--- share_of_team_damage = this row's damage / all hero damage dealt by the attacker's team.
+-- Only damage to ENEMY heroes: creeps and towers (no slot) and friendly fire or self damage are left out.
+-- share_of_team_damage = this row's damage / all enemy-hero damage dealt by the attacker's team.
 with hero_damage as (
     select d.match_id, d.attacker_slot, d.target_slot, d.inflictor_name,
            pa.team as attacker_team, pt.team as target_team,
@@ -8,6 +8,7 @@ with hero_damage as (
     from {{ source('clean', 'damage_events') }} d
     join {{ source('clean', 'players') }} pa on pa.match_id = d.match_id and pa.player_slot = d.attacker_slot
     join {{ source('clean', 'players') }} pt on pt.match_id = d.match_id and pt.player_slot = d.target_slot
+    where pa.team != pt.team  -- guards against friendly fire and self damage inflating a team's total
 ),
 
 grouped as (

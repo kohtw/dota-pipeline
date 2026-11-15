@@ -2,8 +2,9 @@
 dbt stage: build the marts schema from the warehouse `clean` schema with `dbt build`.
 
 Asset-triggered: it runs whenever a load produces CLEAN_LOADED (fresh rows in the warehouse `clean`
-schema) or STEAM_LOADED (fresh stg.steam_* rows), so the marts refresh follows the load without
-polling on a timer. This is the last stage of the chain:
+schema), STEAM_LOADED (fresh stg.steam_* rows) or CONSTANTS_LOADED (new reference data versions in
+stg.constant_*), so the marts refresh follows the load without polling on a timer. This is the last
+stage of the chain:
 
   parse -> RAW_PARSED -> clean -> CLEAN_READY -> load -> CLEAN_LOADED -> dbt_build (here)
 
@@ -15,7 +16,8 @@ docker-compose.yml provides all three.
 
 apply_schema runs every warehouse/init/*.sql first. Init SQL runs on its own only on an empty
 warehouse volume, and some models read tables that a loader creates later (stg.steam_matches), so
-on an older volume the build would fail until that loader had run.
+on an older volume the build would fail until that loader had run. The same goes for
+stg.constant_*, which the dims read even before refresh_constants has ever run.
 """
 
 import os
@@ -26,7 +28,7 @@ from airflow.sdk import dag, task
 from airflow.sdk.exceptions import AirflowFailException
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import CLEAN_LOADED, STEAM_LOADED
+from dota.assets import CLEAN_LOADED, CONSTANTS_LOADED, STEAM_LOADED
 from dota.config import WAREHOUSE_INIT_DIR
 
 # the dbt project + profiles live here inside the container; docker-compose mounts ./dbt there
@@ -37,7 +39,7 @@ DBT_LOG_PATH = "/data/dbt/logs"
 
 
 @dag(
-    schedule=(CLEAN_LOADED | STEAM_LOADED),
+    schedule=(CLEAN_LOADED | STEAM_LOADED | CONSTANTS_LOADED),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

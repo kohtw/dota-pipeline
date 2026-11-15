@@ -2,6 +2,7 @@
 
 import math
 from copy import deepcopy
+from importlib import import_module
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -92,6 +93,9 @@ def hero_app(dashboard_database, warehouse_config, hero_cursor, monkeypatch):
     monkeypatch.setattr(dashboard_database, "load_hero_statistics", MagicMock(return_value=heroes))
     monkeypatch.setattr(dashboard_database, "load_hero_performance", MagicMock(return_value=None))
     monkeypatch.setattr(dashboard_database, "load_hero_matchups", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_hero_duration", MagicMock(return_value=[]))
+    monkeypatch.setattr(dashboard_database, "load_hero_allies", MagicMock(return_value=[]))
+    monkeypatch.setattr(import_module("events_db"), "load_hero_item_timings_by_id", MagicMock(return_value=[]))
     monkeypatch.setattr(dashboard_database, "load_default_match_id", MagicMock(
         side_effect=AssertionError("Hero statistics must not query replay data"),
     ))
@@ -478,3 +482,71 @@ def test_matchup_selection_scoped_to_hero_and_invalid_links_skip_query(hero_app,
     dashboard_database.load_hero_matchups.reset_mock()
     hero_app.run(timeout=15)
     dashboard_database.load_hero_matchups.assert_not_called()
+
+
+# Hero meta, game length, allies and items
+
+DURATION = [dict(bucket_order=1, duration_bucket="Under 30 min", matches=10, wins=7, win_rate=0.7),
+            dict(bucket_order=3, duration_bucket="40–50 min", matches=10, wins=4, win_rate=0.4)]
+
+
+def ally(ally_id, matches, wins, overall=0.6):
+    return dict(ally_hero_id=ally_id, ally_label=f"Hero {ally_id}", matches=matches, wins=wins,
+                losses=matches - wins, win_rate=wins / matches, overall_win_rate=overall,
+                win_rate_difference_pp=100 * (wins / matches - overall))
+
+
+def test_duration_and_ally_loaders_check_rows(dashboard_database, warehouse_config, warehouse_cursor):
+    warehouse_cursor.fetchall.return_value = [(1, "Under 30 min", 10, 7, 0.7)]
+    assert dashboard_database.load_hero_duration(warehouse_config, 1)[0]["wins"] == 7
+    assert warehouse_cursor.execute.call_args.args[1] == (1,)
+    warehouse_cursor.fetchall.return_value = [(1, "Under 30 min", 10, 7, 0.5)]
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_duration(warehouse_config, 1)
+    warehouse_cursor.fetchall.return_value = [(5, None, 4, 3, 1, 0.75, 0.6, 15.0)]
+    assert dashboard_database.load_hero_allies(warehouse_config, 1)[0]["ally_label"] == "Hero 5"
+    warehouse_cursor.fetchall.return_value = [(1, "Self", 4, 3, 1, 0.75, 0.6, 15.0)]
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_allies(warehouse_config, 1)
+    warehouse_cursor.fetchall.return_value = [(1, "short row")]
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_allies(warehouse_config, 1)
+    with pytest.raises(dashboard_database.DashboardDatabaseError):
+        dashboard_database.load_hero_duration(warehouse_config, 0)
+
+
+def test_hero_charts(dashboard_database):
+    hc = import_module("hero_charts")
+    heroes = [dict(hero_id=1, hero_label="Anti-Mage", picks=20, wins=12, pick_rate=0.2, win_rate=0.6),
+              dict(hero_id=2, hero_label="Axe", picks=50, wins=0, pick_rate=0.5, win_rate=0.0),
+              dict(hero_id=3, hero_label="Hero 3", picks=1, wins=1, pick_rate=None, win_rate=None)]
+    meta = hc.build_meta_chart(heroes, 1)
+    assert [trace.customdata[0][0] for trace in meta.data] == [2, 1]  # selected hero drawn last, on top
+    assert list(meta.data[1].text) == ["Anti-Mage"]
+    duration = hc.build_duration_chart(DURATION, 0.6)
+    assert list(duration.data[0].marker.color) == [hc.UP_COLOR, hc.DOWN_COLOR]
+    rows = [ally(slot, 30, wins) for slot, wins in enumerate(range(5, 25), start=10)] + [ally(99, 2, 2)]
+    shown = hc.best_and_worst(rows, minimum_matches=20, count=3)
+    assert [row["ally_hero_id"] for row in shown] == [10, 11, 12, 27, 28, 29]
+    assert len(hc.best_and_worst(rows[:4], minimum_matches=20, count=3)) == 4
+    chart = hc.build_pair_chart(shown, "ally_label")
+    assert chart.data[0].marker.color[0] == hc.DOWN_COLOR and chart.data[0].marker.color[-1] == hc.UP_COLOR
+
+
+def test_hero_page_tabs_show_meta_length_allies_and_items(hero_app, dashboard_database):
+    dashboard_database.load_hero_duration.return_value = DURATION
+    dashboard_database.load_hero_allies.return_value = [ally(slot, 30, 10 + slot) for slot in range(10, 20)]
+    import_module("events_db").load_hero_item_timings_by_id.return_value = [
+        dict(item_name="item_blink", item_display_name="Blink Dagger", hero_matches=3, matches_bought=2,
+             purchase_rate=2 / 3, median_first_purchase_s=900.0, fastest_first_purchase_s=800.0)]
+    app = hero_app
+    app.query_params["view"] = "heroes"
+    app.query_params["hero_id"] = "1"
+    app.run(timeout=15)
+    assert not app.exception and not app.error
+    assert [tab.label for tab in app.tabs] == ["Profile", "Game length", "Matchups", "Allies", "Items"]
+    headings = [element.value for element in app.subheader]
+    for heading in ("Hero meta", "Win rate by game length", "Results with allied heroes", "Item timings"):
+        assert heading in headings
+    assert len(app.get("plotly_chart")) == 4  # meta, game length, allies, items (no matchups here)
+    assert dashboard_database.load_hero_allies.call_args.args[1] == 1
