@@ -9,6 +9,7 @@ dags/                      Airflow DAGs: orchestration only (schedule, retries, 
   dota_daily_download.py   daily 01:00 SGT: pick yesterday's ranked All Pick matches -> download queue
   download_pending.py      hourly: download the queued replays -> Garage
   replay_parse.py          parse one replay in Garage -> parsed Parquet tables in Garage
+  refresh_constants.py     daily (starts paused): heroes, items, patches, game modes -> Garage snapshot -> stg.constant_* history
   dota/                    the actual logic, plain Python, no Airflow
     config.py              constants only (cheap to import)
     steam.py               Valve Steam Web API
@@ -169,7 +170,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
   ```
   (`--project-dir` is where `dbt_project.yml` is; `--profiles-dir` is where `profiles.yml` is. The `DBT_*_PATH` variables keep dbt's output out of the repo. Install with `pip install duckdb dbt-core dbt-duckdb` in a venv outside the repo.)
 - Write portable SQL (plain joins and window functions) so the same models run on DuckDB and Postgres.
-- Reference data is dbt seeds in `dbt/seeds/`: `dim_heroes`, `dim_items`, `dim_patches` (from Valve's dota2.com datafeed) and `dim_game_modes` (from OpenDota, as the datafeed has none). After a game patch, run `python3 scripts/refresh_constants.py`, review the CSV diff, and commit it. Join heroes and items on their `npc_dota_hero_*` / `item_*` names, which is what replays use.
+- Reference data is the dims `dim_heroes`, `dim_items`, `dim_patches` and `dim_game_modes` in `dbt/models/dims/` (heroes, items and patches from Valve's dota2.com datafeed, game modes from OpenDota, as the datafeed has none). The `refresh_constants` DAG keeps their history in `stg.constant_*`; `dim_hero_versions` / `dim_item_versions` hold every version with its validity window. The seeds `dbt/seeds/baseline_*.csv` are the starting version, used where the DAG has not run. Refresh them with `python3 scripts/refresh_constants.py` only to add new keys, then review the CSV diff and commit it. Join heroes and items on their `npc_dota_hero_*` / `item_*` names, which is what replays use. See [docs/constants-lane.md](docs/constants-lane.md).
 
 ### 11. Tests
 

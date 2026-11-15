@@ -1,0 +1,63 @@
+# Reference data dims: the seed baseline (dbt/seeds/baseline_*.csv) followed by the versions the
+# refresh_constants DAG observed (stg.constant_*, DDL warehouse/init/06_constants_tables.sql).
+# dim_heroes / dim_items / dim_patches / dim_game_modes are the current version of each key, with
+# the seeds' columns and types, so marts keep joining them as before. Keys never disappear: one the
+# feed stops listing keeps its last version. The *_versions models allow joins as of a match's time:
+# valid_from <= t and (valid_to is null or t < valid_to).
+version: 2
+models:
+  - name: dim_hero_versions
+    description: "One row per hero version. The baseline version is valid from 1970-01-01; a later one from the snapshot that first showed it. valid_to is NULL for the current version."
+    data_tests:
+      - valid_windows:
+          arguments: {key: hero_id}
+    columns:
+      - name: hero_id
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+  - name: dim_item_versions
+    description: "One row per item version. The baseline version is valid from 1970-01-01; a later one from the snapshot that first showed it. valid_to is NULL for the current version."
+    data_tests:
+      - valid_windows:
+          arguments: {key: item_id}
+    columns:
+      - name: item_id
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+  - name: dim_heroes
+    description: "One row per Dota 2 hero, its current version. Join on npc_name (matches the clean hero_name), not hero_id. roles lists the strongest first."
+    columns:
+      - name: hero_id
+        data_tests: [unique, not_null]
+      - name: npc_name
+        data_tests: [unique, not_null]
+      - name: localized_name
+        data_tests: [not_null]
+      - name: primary_attr
+        data_tests:
+          - accepted_values: {arguments: {values: ["str", "agi", "int", "all"]}}
+  - name: dim_items
+    description: "One row per item, recipes included (is_recipe), its current version. Join on name, the item_* name replays use. localized_name is NULL for a few recipes Valve leaves unnamed."
+    columns:
+      - name: item_id
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [unique, not_null]
+  - name: dim_patches
+    description: "One row per gameplay patch with its release time in UTC. A match belongs to the latest patch released before its start time."
+    columns:
+      - name: patch
+        data_tests: [unique, not_null]
+      - name: released_at
+        data_tests: [unique, not_null]
+  - name: dim_game_modes
+    description: "One row per Dota 2 game mode id, with a readable label."
+    columns:
+      - name: game_mode_id
+        data_tests: [unique, not_null]
