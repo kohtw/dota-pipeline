@@ -79,6 +79,40 @@ def test_all_nine_tables_pass_strict_validation(result):
         "credited_killer_slot:int,link_status:string>")
 
 
+def test_partial_assists_publish_flags_report_and_marker(raw, tmp_path):
+    tables = dict(raw)
+    for name in ("player_resource", "kda_changes"):
+        df = tables[name]
+        final = F.col("tick") > 30
+        tables[name] = (df.withColumn("m_vecPlayerTeamData.m_iKills",
+            F.when(final & (F.col("index") == 0), 2)
+             .otherwise(base.col("m_vecPlayerTeamData.m_iKills")))
+            .withColumn("m_vecPlayerTeamData.m_iDeaths",
+            F.when(final & (F.col("index") == 6), 1)
+             .otherwise(base.col("m_vecPlayerTeamData.m_iDeaths"))))
+    combat = tables["combatlog"]
+    second = combat.filter(F.col("type") == "DOTA_COMBATLOG_DEATH").withColumn("target_name_idx", F.lit(6))
+    tables["combatlog"] = combat.unionByName(second)
+    partial = clean.build_clean(tables, MATCH)
+    try:
+        match = partial.tables["matches"].first()
+        assert match.assist_attribution_complete is False
+        assert match.assist_attribution_assumed is False
+        assert partial.tables["death_assists"].count() == 0
+        assert partial.tables["deaths"].count() == 2
+        assert partial.attribution["unresolved_assists"] == {1: 1}
+        report = clean.validate(partial, MATCH)
+        assert report["errors"] == []
+        # Without the known withheld credit, the scoreboard check must fail.
+        assert clean.scoreboard_disagreements(partial.tables).count() == 1
+        assert clean.write_result(tables["players"].sparkSession, partial, report, str(tmp_path))
+        saved = json.loads((tmp_path / "_review" / f"match_id={MATCH}" / "report.json").read_text())
+        assert saved["assist_attribution"]["unresolved_assists"] == {"1": 1}
+        assert (tmp_path / "_complete" / f"match_id={MATCH}" / "_SUCCESS").exists()
+    finally:
+        partial.release()
+
+
 def test_writer_saves_new_columns_and_marker_last(spark, result, tmp_path):
     import pyarrow.parquet as pq
 

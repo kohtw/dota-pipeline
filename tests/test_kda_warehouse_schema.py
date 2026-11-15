@@ -21,6 +21,8 @@ def test_fresh_dev_database_has_credit_columns_and_updated_fixture(tmp_path):
         assert conn.execute("SELECT count(*) FROM clean.death_assists WHERE match_id = 9000000001 "
                             "AND same_side = FALSE").fetchone()[0] == 3
         assert conn.execute("SELECT count(*) FROM clean.death_assists WHERE same_side = TRUE").fetchone()[0] == 1
+        assert conn.execute("SELECT assist_attribution_complete, assist_attribution_assumed "
+                            "FROM clean.matches").fetchone() == (True, False)
         # Repeating the migration must not reset meaningful credit or labels.
         migration = (INIT / "02_clean_tables.sql").read_text()
         conn.execute(migration)
@@ -50,3 +52,15 @@ def test_upgrade_preserves_unknown_legacy_credit_without_guessing():
                      "VALUES (1, 80, 1.0, 5, NULL, 'tower', 0, 'participant_assumed')")
         assert conn.execute("SELECT killer_slot, credited_killer_slot, link_status FROM clean.deaths").fetchone() == (
             None, 0, "participant_assumed")
+
+
+def test_attribution_upgrade_preserves_unknown_legacy_matches():
+    with duckdb.connect() as conn:
+        conn.execute("CREATE SCHEMA clean")
+        conn.execute("CREATE TABLE clean.matches (match_id BIGINT)")
+        conn.execute("INSERT INTO clean.matches VALUES (1)")
+        migration = (INIT / "02_clean_tables.sql").read_text()
+        conn.execute(migration)
+        conn.execute(migration)
+        assert conn.execute("SELECT assist_attribution_complete, assist_attribution_assumed "
+                            "FROM clean.matches").fetchone() == (None, None)

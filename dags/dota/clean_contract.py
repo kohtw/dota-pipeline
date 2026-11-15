@@ -19,7 +19,8 @@ PARSED_COMPLETE = "parsed/_complete"  # the raw-layer marker (see contract.py)
 # match_id is the partition (in the path), not a column inside the files.
 # Names come from warehouse/init/02_clean_tables.sql.
 REQUIRED_COLUMNS = {
-    "matches": ("game_mode", "winner_team", "end_time", "game_start_tick", "duration_s"),
+    "matches": ("game_mode", "winner_team", "end_time", "game_start_tick", "duration_s",
+                "assist_attribution_complete", "assist_attribution_assumed"),
     "players": ("player_slot", "team", "team_slot", "hero_name", "hero_id"),
     "player_stats": ("player_slot", "tick", "game_time_s", "level", "kills", "deaths", "assists", "net_worth",
                      "unspent_gold", "total_earned_gold", "total_earned_xp", "last_hits", "denies",
@@ -96,8 +97,14 @@ def check_table(name: str, table, match_id: int) -> int:
         if not pa.types.is_boolean(sides.type) or sides.null_count:
             raise CleanContractError("death_assists: same_side must be a non-null boolean")
     if name == "matches":
+        import pyarrow as pa
+
         if rows != 1:
             raise CleanContractError(f"matches: {rows} rows, expected 1")
+        for field in ("assist_attribution_complete", "assist_attribution_assumed"):
+            flag = table.column(field)
+            if not pa.types.is_boolean(flag.type) or flag.null_count:
+                raise CleanContractError(f"matches: {field} must be a non-null boolean")
         winner = table.column("winner_team")[0].as_py()
         if winner not in TEAMS:
             raise CleanContractError(f"matches: winner_team is {winner}, expected 2 or 3")

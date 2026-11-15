@@ -175,11 +175,15 @@ def test_independent_scoreboard_mismatch_blocks():
         kda.credit_kda(players, rows, [], final)
 
 
-def test_ambiguous_assist_to_death_links_block_even_when_totals_match():
-    with pytest.raises(kda.CreditError, match="Ambiguous"):
-        run([death(victim=5), death(victim=6)],
-            [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
-             (11, 0, {"kills": 2}), (11, 1, {"assists": 1})])
+def test_ambiguous_assists_are_withheld_with_exact_counter_accounting():
+    result = run([death(victim=5), death(victim=6)],
+                 [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
+                  (11, 0, {"kills": 2}), (11, 1, {"assists": 1})])
+    assert [r["credited_killer_slot"] for r in result.deaths] == [0, 0]
+    assert result.death_assists == []
+    assert result.unresolved_assists == {1: 1}
+    assert result.ambiguous_groups[0]["unresolved_assists"] == {1: 1}
+    assert {r["reason"] for r in result.review} == {"unresolved_assist_attribution"}
 
 
 def test_assist_participants_resolve_ambiguity_and_label_the_component():
@@ -191,11 +195,46 @@ def test_assist_participants_resolve_ambiguity_and_label_the_component():
 
 
 @pytest.mark.parametrize("participants", [[], [1]])
-def test_unhelpful_assist_lists_preserve_original_ambiguity(participants):
+def test_unhelpful_assist_lists_preserve_unresolved_credit(participants):
     # Empty lists rule out every allocation; shared lists still allow both.
-    with pytest.raises(kda.CreditError, match="Ambiguous credit assignment"):
-        run([death(victim=5, assist_players=participants),
-             death(victim=6, assist_players=participants)],
+    result = run([death(victim=5, assist_players=participants),
+                  death(victim=6, assist_players=participants)],
+                 [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
+                  (11, 0, {"kills": 2}), (11, 1, {"assists": 1})])
+    assert result.death_assists == []
+    assert result.unresolved_assists == {1: 1}
+
+
+def test_partial_group_does_not_discard_assists_from_an_isolated_death():
+    result = run([death(victim=5), death(victim=6), death(tick=100, victim=7)],
+                 [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
+                  (11, 0, {"kills": 2}), (11, 1, {"assists": 1}),
+                  (101, 7, {"deaths": 1}), (101, 0, {"kills": 1}),
+                  (102, 1, {"assists": 1})])
+    assert [(r["victim_slot"], r["assist_slot"]) for r in result.death_assists] == [(7, 1)]
+    assert result.unresolved_assists == {1: 1}
+
+
+def test_partial_assists_do_not_hide_alternative_killer_beyond_first_answers():
+    # First answers can differ only in assists; a later answer can swap killers.
+    with pytest.raises(kda.CreditError, match="Ambiguous.*kill"):
+        run([death(victim=5, killer=None), death(victim=6, killer=None)],
+            [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
+             (11, 0, {"kills": 1}), (11, 1, {"kills": 1}),
+             (11, 2, {"assists": 1})])
+
+
+def test_partial_match_is_not_accepted_if_kill_uniqueness_search_exhausts(monkeypatch):
+    original = kda._solve
+
+    def bounded(*args, **kwargs):
+        if kwargs.get("different_killer_only"):
+            raise kda.CreditError("Credit search limit exceeded; attribution not established")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kda, "_solve", bounded)
+    with pytest.raises(kda.CreditError, match="search limit exceeded"):
+        run([death(victim=5), death(victim=6)],
             [(11, 5, {"deaths": 1}), (11, 6, {"deaths": 1}),
              (11, 0, {"kills": 2}), (11, 1, {"assists": 1})])
 

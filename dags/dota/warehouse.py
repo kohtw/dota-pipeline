@@ -116,7 +116,7 @@ def load_match(match_id: int, read: Callable[[str], bytes],
                 counts[table] = 0  # cleared above; Spark wrote nothing for this table
                 continue
             parquet = _read_table(parts, read)
-            if table in {"deaths", "death_assists"}:
+            if table in {"matches", "deaths", "death_assists"}:
                 # Never turn legacy last hitters into scoreboard credit or supply
                 # invented default labels. Copy validated new fields unchanged.
                 clean_contract.check_table(table, parquet, match_id)

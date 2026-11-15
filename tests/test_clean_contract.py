@@ -12,7 +12,9 @@ MATCH = 9079737909
 def table(name: str, **overrides) -> pa.Table:
     """A valid table for `name` (all required columns, no match_id), with column overrides."""
     if name == "matches":
-        cols = {c: [1] for c in cc.REQUIRED_COLUMNS[name]} | {"winner_team": [2]}
+        cols = {c: [1] for c in cc.REQUIRED_COLUMNS[name]} | {
+            "winner_team": [2], "assist_attribution_complete": [True],
+            "assist_attribution_assumed": [False]}
     elif name == "players":
         cols = {c: [1] * 10 for c in cc.REQUIRED_COLUMNS[name]} | {"team": [2] * 5 + [3] * 5}
     else:
@@ -57,6 +59,19 @@ def test_valid_output_passes_and_counts_rows():
 
 def test_extra_columns_are_allowed():
     assert check(store(positions=table("positions", z=[0.0])))["positions"] == 1
+
+
+@pytest.mark.parametrize("field", ["assist_attribution_complete", "assist_attribution_assumed"])
+@pytest.mark.parametrize("value", [None, 1, "false"])
+def test_match_attribution_flags_must_be_explicit_booleans(field, value):
+    with pytest.raises(cc.CleanContractError, match=field):
+        check(store(matches=table("matches", **{field: [value]})))
+
+
+def test_partial_and_assumed_match_can_have_no_published_assist_links():
+    assert check(store(matches=table("matches", assist_attribution_complete=[False],
+                                     assist_attribution_assumed=[True]),
+                       death_assists=None))["death_assists"] == 0
 
 
 @pytest.mark.parametrize("name, column", [

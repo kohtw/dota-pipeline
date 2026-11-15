@@ -217,7 +217,8 @@ def load_scoreboard(config: WarehouseConfig, match_id: int) -> tuple[dict, list[
                    s.kills, s.deaths, s.assists, s.last_hits, s.denies, s.net_worth,
                    s.unspent_gold AS gold, s.final_item_labels AS final_items, s.duration_s, s.won,
                    kp.kill_participation, CAST(kp.team_kills AS BIGINT) AS team_kills,
-                   kp.kill_involvements
+                   kp.kill_involvements,
+                   s.assist_attribution_complete, s.assist_attribution_assumed
             FROM marts.match_scoreboard AS s
             LEFT JOIN marts.kill_participation AS kp
               ON kp.match_id = s.match_id AND kp.player_slot = s.player_slot

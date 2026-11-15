@@ -5,7 +5,7 @@
 -- d1's last hitter is a tower, but slot0 receives kill credit.
 -- Assists: slot1 on d1,d2; slot6 on d3; slot5 also receives same-side credit on d1.
 
-INSERT INTO clean.matches VALUES (9000000001, 22, 2, 1700000000, 1800, 600.0);
+INSERT INTO clean.matches VALUES (9000000001, 22, 2, 1700000000, 1800, 600.0, TRUE, FALSE);
 
 INSERT INTO clean.players VALUES
  (9000000001, 0, 2, 0, 'npc_dota_hero_antimage',     1),
@@ -79,7 +79,7 @@ INSERT INTO clean.final_inventory VALUES
 
 -- A second small fixture covers a zero-kill team and an assist on a death with
 -- no credited player kill. That assist belongs in K/D/A but not participation.
-INSERT INTO clean.matches VALUES (9000000002, 22, 2, 1700000600, 1800, 600.0);
+INSERT INTO clean.matches VALUES (9000000002, 22, 2, 1700000600, 1800, 600.0, TRUE, FALSE);
 INSERT INTO clean.players VALUES
  (9000000002, 0, 2, 0, 'npc_dota_hero_antimage', 1),
  (9000000002, 5, 3, 0, 'npc_dota_hero_axe', 2),

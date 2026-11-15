@@ -61,7 +61,7 @@ models:
         data_tests: [not_null]
 
   - name: kill_participation
-    description: "One player in one match. Full counter-credited K/D/A remains available for reconciliation. Participation uses credited kills plus eligible assists on the player's team's credited kills; same-side assists stay in K/D/A but do not enter participation. NULL when the team has no credited kills."
+    description: "One player in one match. Kills/deaths are established; assists_from_events contains published links only. Participation is NULL for partial or unverified assist attribution and for zero-kill teams. Recorded full K/D/A stays in match_scoreboard."
     columns:
       - name: player_key
         data_tests: [not_null, unique]
@@ -71,14 +71,17 @@ models:
       - name: deaths_from_events
         data_tests: [not_null]
       - name: assists_from_events
-        description: "Every recorded assist, including same-side credit and assists without a player-credited kill."
+        description: "Published assist links, including same-side credit; may be below recorded assists for partial matches."
         data_tests: [not_null]
       - name: assists_on_team_kills
         description: "Opposing-side assists on kills credited to this player's team; excludes the credited killer."
         data_tests: [not_null]
       - name: kill_involvements
-        description: "Participation numerator: kills_from_events plus assists_on_team_kills."
-        data_tests: [not_null]
+        description: "Participation numerator for complete attribution; NULL for partial or unverified matches."
+      - name: assist_attribution_complete
+        description: "False when ambiguous timing groups have withheld assist links. NULL on unverified legacy matches."
+      - name: assist_attribution_assumed
+        description: "True when event links depend on participant or team assumptions; independent of completeness."
       - name: team_kills
         data_tests: [not_null]
 

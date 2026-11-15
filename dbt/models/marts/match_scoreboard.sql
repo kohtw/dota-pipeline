@@ -47,6 +47,8 @@ select
     s.healing,
     s.total_earned_gold / (m.duration_s / 60.0) as gpm,
     m.duration_s,
+    m.assist_attribution_complete,
+    m.assist_attribution_assumed,
     i.final_items,
     i.final_item_labels
 from final_stats s

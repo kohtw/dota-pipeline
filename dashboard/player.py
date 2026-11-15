@@ -26,6 +26,8 @@ def _format_game_time(seconds: int) -> str:
 
 def _kill_participation_detail(player: dict) -> str:
     """Show the mart's percentage alongside its event-based kill counts."""
+    if player.get("assist_attribution_complete") is False:
+        return f"{MISSING_VALUE} · Assist attribution incomplete"
     percentage = format_percentage(player.get("kill_participation"))
     team_kills = player.get("team_kills")
     involvements = player.get("kill_involvements")

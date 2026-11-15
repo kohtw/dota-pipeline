@@ -35,7 +35,8 @@ def scoreboard_rows():
              hero_label={"antimage": "Anti-Mage", "crystal_maiden": "Crystal Maiden", "axe": "Axe", "lina": "Lina"}[hero], team=team,
              kills=kills, deaths=deaths, assists=assists, last_hits=80, denies=10,
              net_worth=net_worth, gold=gold, final_items=items, duration_s=600.0,
-             won=won, kill_participation=kp, team_kills=team_kills, kill_involvements=involvements)
+             won=won, kill_participation=kp, team_kills=team_kills, kill_involvements=involvements,
+             assist_attribution_complete=True, assist_attribution_assumed=False)
         for slot, hero, team, kills, deaths, assists, net_worth, gold, items, won, kp, team_kills, involvements
         in players
     ]

@@ -19,7 +19,7 @@ The DDL is in [`warehouse/init/`](../warehouse/init/). This file documents it; k
 - **Teams:** `2` Radiant, `3` Dire.
 - **World coordinates:** `x = m_cellX * 128 + m_vecX - 16384`, same for `y`.
 - **Real heroes only:** drop illusion entities from position/inventory processing and illusion participants from damage processing. For deaths, exclude illusion victims but retain illusion attackers: the real victim's death and the owner's kill credit can still count.
-- **Scoreboard credit:** per-tick `kda_changes` counters establish deaths, kills and assists. Keep direct last hitter separate from credited killer. Every counter increment must be accounted for and final totals must equal the final sampled scoreboard. Reports identify `credit_method = per_tick_counters` and `contract_version = kda-credit-v1`.
+- **Scoreboard credit:** per-tick `kda_changes` counters establish deaths, kills and assists. Keep direct last hitter separate from credited killer. Every counter increment must be accounted for and final totals must equal the final sampled scoreboard. Reports identify `credit_method = per_tick_counters` and `contract_version = kda-credit-v2`.
 - **Names resolved:** `*_name_idx` columns are joined to `names.name`; item handles through `item_entities` to `entity_names`.
 - **Nulls:** a missing value is `NULL`, never `0`. Exception: key columns cannot be null (see `inflictor_name`).
 - **Money:** `net_worth` (gold plus the value of items) and `unspent_gold` (gold in hand) are different numbers and are never mixed.
@@ -39,6 +39,8 @@ The DDL is in [`warehouse/init/`](../warehouse/init/). This file documents it; k
 | `end_time`        | BIGINT           | `match.end_time` (Unix seconds)                             |
 | `game_start_tick` | INTEGER          | first `gamerules` tick with state 5                         |
 | `duration_s`      | DOUBLE PRECISION | last `gamerules` row: `m_flGameEndTime - m_flGameStartTime` |
+| `assist_attribution_complete` | BOOLEAN, not null | False when ambiguous groups have withheld assist links |
+| `assist_attribution_assumed` | BOOLEAN, not null | True when published event links depend on participant or same-side assumptions; independent of completeness |
 
 ### `players`
 
@@ -118,10 +120,14 @@ counter rise are not scoreboard deaths and remain review notes.
 
 Resolve source ownership and counter increases together. `killer_slot` is not a scoreboard kill
 key: a tower can be the last hitter while `credited_killer_slot` identifies the credited player.
-A decrease, missing increment, inconsistent final total, conflicting source or non-unique primary
-assignment blocks completion. The bounded attribution solver is in `spark_jobs/clean_replays.py`.
+A decrease, missing increment, inconsistent final total, conflicting source, ambiguous kill
+assignment or exceeded search limit blocks completion. Assist-only ambiguity can publish partial
+output after a separate bounded search proves every credited killer is unique, including under
+relaxed participant/team constraints. The bounded attribution solver is in `spark_jobs/clean_replays.py`.
 
-`participant_assumed` means relaxing participant constraints allows a different link.
+`participant_assumed` means relaxing participant constraints allows a different link, or the
+assist-participant fallback selected one allocation from multiple counter-consistent answers.
+The fallback is attempted only on ambiguous groups; lists are not mandatory for unique assists.
 `same_side_possible` means allowing same-team credit allows a different link. These labels retain
 link uncertainty even when final player totals are exact; exact totals alone do not prove each
 individual assist-to-death association.
@@ -143,11 +149,22 @@ The raw list provides participant constraints, uses normalized slots 0-9 directl
 credited players or include the killer. Never divide those participant IDs by two. Retain actual
 same-team credit, including a victim's recorded assist increase, with `same_side = true`.
 
+When ambiguity remains, omit all assist links in that timing group. Publish its established
+hero deaths and uniquely proven kill credits. Set `assist_attribution_complete = false` on the
+match. Keep recorded player K/D/A unchanged. The review report's `assist_attribution` includes
+per-player `unresolved_assists`, affected death ticks/victims, raw participant lists and the
+counter increases that were withheld. Every counter increase is accounted for once; published
+assist counts plus unresolved counts must equal each player's recorded assists exactly.
+No arbitrary victim assignment is published. Other timing groups retain their links.
+Both match flags are required explicit booleans on new output. They are independent;
+partial and assumed attribution can coexist in one match.
+
 ### Upgrading existing warehouses
 
 `warehouse/init/02_clean_tables.sql` declares the credit fields for fresh tables and
 ends with repeat-safe `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements for existing
-Postgres/DuckDB databases. No separate migration file is required.
+Postgres/DuckDB databases. The same file adds the two match-quality flags
+for existing tables, preserving NULL for unverified historical rows.
 Existing rows retain NULL credit fields because their old last-hitter data does not establish
 scoreboard credit or confidence. Re-clean and reload those matches; never backfill
 `credited_killer_slot = killer_slot`, `link_status = exact`, or `same_side = false` by assumption.
@@ -156,8 +173,11 @@ also require non-null `link_status` and `same_side`; upgraded legacy columns rem
 historical rows have been replaced. `load_pending.apply_schema` applies init/migration SQL before
 new Parquet rows are inserted, independently of the later dbt build.
 
-dbt counts kills by `credited_killer_slot` and retains the full assist ledger for K/D/A
-reconciliation. The dashboard's participation numerator is `kill_involvements`, which adds
+dbt counts kills by `credited_killer_slot` and retains published assist links for K/D/A
+reconciliation. Complete matches require exact assist equality; partial matches require linked
+assists not to exceed the recorded total. Exact explanations for withheld counts are validated
+by the cleaner and saved in its report. Legacy unknown flags fail the K/D/A check until revalidated.
+The dashboard's participation numerator is `kill_involvements`, which adds
 credited kills to eligible assists on kills credited to that player's team. Same-side assists
 and assists on deaths with no player-credited kill remain in K/D/A but are excluded from this
 numerator. Rebuild the marts after migrating and reloading historical clean rows.
@@ -290,10 +310,11 @@ Small samples can give unstable results; these are whole-match team outcomes,
 not lane performance, direct damage or causal counter strength. Full definitions
 and examples are in [hero-matchup-contract.md](hero-matchup-contract.md).
 
-`kill_participation` retains `kills_from_events`, `deaths_from_events`, and the full
-`assists_from_events` for strict scoreboard comparison. `assists_on_team_kills` is the subset
+`kill_participation` retains `kills_from_events`, `deaths_from_events`, and published
+`assists_from_events`. Full recorded totals remain in `match_scoreboard`. `assists_on_team_kills` is the subset
 eligible for participation, and `kill_involvements = kills_from_events + assists_on_team_kills`.
-The ratio is `kill_involvements / team_kills`, or NULL when the team has no credited kills.
+The ratio is `kill_involvements / team_kills`. Both the numerator and ratio are NULL when
+assist attribution is partial or unknown; the ratio is also NULL for teams with no credited kills.
 The dashboard uses this same numerator in its count and percentage displays. Link-status labels
 remain in clean output and do not silently remove otherwise established scoreboard totals.
 

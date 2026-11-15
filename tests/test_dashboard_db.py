@@ -21,6 +21,8 @@ def test_scoreboard_maps_mart_rows(dashboard_database, warehouse_config, scorebo
     assert antimage["gold"] == 400
     assert antimage["main_inventory"] == ["Blink Dagger", "Desolator"]
     assert antimage["kill_participation"] == pytest.approx(2 / 3)
+    assert antimage["assist_attribution_complete"] is True
+    assert antimage["assist_attribution_assumed"] is False
     assert players[1]["main_inventory"] is None
     query, params = scoreboard_cursor.execute.call_args.args
     assert "WHERE s.match_id = %s" in query
