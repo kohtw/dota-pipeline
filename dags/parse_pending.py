@@ -1,6 +1,9 @@
 """
-Hourly sweep: parse every replay in Garage that has no complete parsed output yet, then check
+Parse sweep: parse every replay in Garage that has no complete parsed output yet, then check
 each match's output against docs/data-contract.md.
+
+It runs whenever download_pending or cold_restore produces REPLAYS_ARRIVED (new replays), and at
+:00 past every hour as a fallback for a missed trigger.
 
 It works from what is in Garage, not from which DAG put it there, so it picks up replays from
 download_pending, a manual upload, or a bulk import alike. A replay is only skipped once its
@@ -18,14 +21,14 @@ wakes clean_pending, and so on down the chain (clean -> load -> dbt).
 import os
 from datetime import datetime, timedelta
 
-from airflow.sdk import dag, get_current_context, task, task_group
+from airflow.sdk import AssetOrTimeSchedule, CronTriggerTimetable, dag, get_current_context, task, task_group
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import RAW_PARSED
+from dota.assets import RAW_PARSED, REPLAYS_ARRIVED
 from dota.config import BUCKET, DOCKER_NETWORK, JOB_MEM_LIMIT, S3_ENV_VARS
 from dota.jobs import EXIT_CODE_KEY, JobOperator
 
-BATCH = 20  # replays per run; the rest wait for the next hour
+BATCH = 20  # replays per run; the rest wait for the next run
 PARALLEL_PARSES = 2  # each parser container holds a whole replay in memory
 # label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
 MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
@@ -33,7 +36,8 @@ PARSE_LABEL = "{{ task.command[0].rsplit('/', 1)[-1].removesuffix('.dem') }}"  #
 
 
 @dag(
-    schedule="@hourly",
+    schedule=AssetOrTimeSchedule(timetable=CronTriggerTimetable("0 * * * *", timezone="UTC"),
+                                 assets=REPLAYS_ARRIVED),
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,

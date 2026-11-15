@@ -71,13 +71,14 @@ def fixture(spark):
             tdrows.append(row)
     out["team_data"] = frame(spark, tdrows, [("match_id", "long"), ("tick", "int"), ("index", "int"), ("class", "string")]
         + [(f"m_vecDataTeam.{p}", "double" if p in tdprops[-3:] else "int") for p in tdprops])
-    hero_fields = [("match_id", "long"), ("tick", "int"), ("handle", "int"), ("m_iPlayerID", "int"),
+    hero_fields = [("match_id", "long"), ("tick", "int"), ("handle", "int"), ("class", "string"), ("m_iPlayerID", "int"),
         ("m_iTeamNum", "int"), ("m_hReplicatingOtherHeroModel", "int"), ("CBodyComponent.m_cellX", "int"),
         ("CBodyComponent.m_cellY", "int"), ("CBodyComponent.m_vecX", "double"), ("CBodyComponent.m_vecY", "double")]
     hero_fields += [(f"m_hItems.{i:04d}", "int") for i in range(17)]
     hero_rows = []
     for i in range(10):
-        row = {"match_id": MATCH, "tick": 90, "handle": i, "m_iPlayerID": i * 2, "m_iTeamNum": 2 if i < 5 else 3,
+        row = {"match_id": MATCH, "tick": 90, "handle": i, "class": f"CDOTA_Unit_Hero_Test_{i}",
+               "m_iPlayerID": i * 2, "m_iTeamNum": 2 if i < 5 else 3,
                "m_hReplicatingOtherHeroModel": clean.NULL_HANDLE, "CBodyComponent.m_cellX": 128,
                "CBodyComponent.m_cellY": 128, "CBodyComponent.m_vecX": 10., "CBodyComponent.m_vecY": 20.}
         row.update({f"m_hItems.{slot:04d}": 1000 + i if slot == 0 else clean.NULL_HANDLE for slot in range(17)})

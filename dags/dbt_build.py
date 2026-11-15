@@ -18,6 +18,10 @@ apply_schema runs every warehouse/init/*.sql first. Init SQL runs on its own onl
 warehouse volume, and some models read tables that a loader creates later (stg.steam_matches), so
 on an older volume the build would fail until that loader had run. The same goes for
 stg.constant_*, which the dims read even before refresh_constants has ever run.
+
+Both tasks take the one-slot pool warehouse_write, shared with the loads in load_pending and
+steam_summary_elt. dbt tests compare live clean.* tables with marts built earlier in the same run,
+so a load committing mid-build failed them.
 """
 
 import os
@@ -47,7 +51,7 @@ DBT_LOG_PATH = "/data/dbt/logs"
     tags=["orchestration"],
 )
 def dbt_build():
-    @task
+    @task(pool="warehouse_write")
     def apply_schema() -> list[str]:
         from dota import warehouse
 
@@ -59,7 +63,7 @@ def dbt_build():
         print(f"applied {applied} from {WAREHOUSE_INIT_DIR}")
         return applied
 
-    @task
+    @task(pool="warehouse_write")
     def build() -> None:
         # inherit the container env (carries the WAREHOUSE_* vars from compose) and point dbt's
         # writable output at /data so nothing is written into the repo / profiles mount

@@ -4,6 +4,9 @@ from {{ ref('kill_participation') }}
 where kill_participation < 0 or kill_participation > 1
    or kill_involvements < 0 or kill_involvements > team_kills
    or (team_kills = 0 and kill_participation is not null)
-   or (team_kills > 0 and kill_participation is null)
+   or (assist_attribution_complete and team_kills > 0 and kill_participation is null)
+   or (assist_attribution_complete and kill_involvements is null)
+   or (assist_attribution_complete is not true
+       and (kill_participation is not null or kill_involvements is not null))
    or assists_on_team_kills > assists_from_events
    or kill_involvements <> kills_from_events + assists_on_team_kills

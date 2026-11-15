@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NULL_HANDLE = 16777215
 # Keep output definitions explicit: casts must agree with warehouse/init/02_clean_tables.sql.
 SCHEMAS = {
-    "matches": "match_id long, game_mode int, winner_team int, end_time long, game_start_tick int, duration_s double",
+    "matches": "match_id long, game_mode int, winner_team int, end_time long, game_start_tick int, duration_s double, assist_attribution_complete boolean, assist_attribution_assumed boolean",
     "players": "match_id long, player_slot int, team int, team_slot int, hero_name string, hero_id int",
     "player_stats": "match_id long, player_slot int, tick int, game_time_s double, level int, kills int, deaths int, assists int, net_worth int, unspent_gold int, total_earned_gold int, total_earned_xp int, last_hits int, denies int, hero_damage double, tower_damage double, healing double",
     "positions": "match_id long, player_slot int, tick int, game_time_s double, x double, y double",
@@ -147,6 +147,7 @@ class CleanResult:
     tables: dict[str, DataFrame] = field(default_factory=dict)
     diagnostics: dict[str, tuple[DataFrame, bool]] = field(default_factory=dict)
     messages: list[str] = field(default_factory=list)
+    attribution: dict = field(default_factory=dict)
 
     def note(self, name, df, blocking=True):
         self.diagnostics[name] = (df, blocking)
@@ -180,7 +181,9 @@ def _build_replay_tables(raw):
                 | col("duration_s").isNull() | (col("duration_s") <= 0)))
     matches = (raw["match"].select("match_id", "game_mode", col("game_winner").alias("winner_team"), "end_time")
                .join(starts, "match_id", "left").join(clock.drop("end"), "match_id", "left"))
-    result.tables["matches"] = matches
+    result.tables["matches"] = (matches
+        .withColumn("assist_attribution_complete", F.lit(True))
+        .withColumn("assist_attribution_assumed", F.lit(False)))
 
     def timed(df):
         return (df.join(starts, "match_id", "left")
@@ -220,7 +223,14 @@ def _build_replay_tables(raw):
     stats = pr.join(td, join_key, "left").withColumn("unspent_gold", col("reliable") + col("unreliable"))
     result.tables["player_stats"] = timed(stats)
 
-    heroes = raw["heroes"]
+    # heroes = raw["heroes"]
+    # These summons share the hero class prefix but lack hero properties.
+    summon_classes = [
+        "CDOTA_Unit_Hero_Beastmaster_Boar",
+        "CDOTA_Unit_Hero_Beastmaster_Hawk",
+    ]
+    heroes = raw["heroes"].filter(~col("class").isin(*summon_classes))
+    
     result.note("unknown_replication_marker", heroes.filter(col("m_hReplicatingOtherHeroModel").isNull()))
     real = heroes.filter(col("m_hReplicatingOtherHeroModel") == NULL_HANDLE)
     valid_hero = (col("m_iPlayerID").between(0, 18) & ((col("m_iPlayerID") % 2) == 0))
@@ -297,6 +307,8 @@ def validate(result, match_id):
         required.update(c for c in ["game_time_s"] if c in df.columns)
         if name == "players":
             required.update(["team", "team_slot", "hero_name"])
+        if name == "matches":
+            required.update(["assist_attribution_complete", "assist_attribution_assumed"])
         if name == "final_inventory":
             required.add("item_name")
         if name == "deaths":
@@ -328,7 +340,8 @@ def validate(result, match_id):
         findings[name] = {"rows": n, "blocking": blocking}
         if n and blocking:
             errors.append(f"{name}: {n} rows need review")
-    return {"match_id": match_id, "table_rows": counts, "findings": findings, "errors": errors}
+    return {"match_id": match_id, "table_rows": counts, "findings": findings,
+            "errors": errors, "assist_attribution": result.attribution}
 
 
 def write_json(spark, path, payload):
@@ -378,6 +391,8 @@ class CreditResult:
     deaths: list[dict]
     death_assists: list[dict]
     review: list[dict]
+    unresolved_assists: dict[int, int] = field(default_factory=dict)
+    ambiguous_groups: list[dict] = field(default_factory=list)
 
 
 STATS = ("kills", "deaths", "assists")
@@ -391,17 +406,19 @@ def _integer(value, label):
 
 def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
                max_search_states=100_000):
-    """Return unique per-death credit, checked against independent final totals.
+    """Return established credit and explicitly withheld assist counts.
 
     Inputs are normalized records for one match: players have player_slot/team;
     counters have tick/player_slot/kills/deaths/assists; deaths have tick,
     victim_slot, explicit illusion flags, optional last hitter/source owner and
-    a list of assist slots. final_scoreboard independently supplies final K/D/A.
+    a list of assist slots. final_scoreboard supplies separately sampled final K/D/A.
     Counters require the initial zero row and every subsequent per-tick change.
 
     Search is bounded per connected timing window. Exhaustion blocks rather than
     assuming that the first solution is unique. Counter deltas greater than one
-    are supported when several deaths occur at the same tick.
+    are supported when several deaths occur at the same tick. Unresolved groups
+    publish deaths only after proving unique kill credit; their assists are
+    withheld and accounted for against the same final totals.
     """
     if _integer(window_ticks, "window_ticks") < 0:
         raise CreditError("window_ticks must be nonnegative")
@@ -521,20 +538,65 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
         buckets[possible[0]][token] = count
 
     output, assists = [], []
+    unresolved_assists = Counter()
+    ambiguous_groups = []
     for component, budget in zip(components, buckets):
+        allow_same_side = False
+        participant_fallback = False
         primary = _solve(component, budget, teams, window_ticks, max_search_states)
         if not primary:
             # Actual same-team credit is allowed, but must still be uniquely determined.
+            allow_same_side = True
             primary = _solve(component, budget, teams, window_ticks, max_search_states,
                              same_side=True)
-        if len(primary) != 1:
-            raise CreditError("No consistent credit answer" if not primary else "Ambiguous credit assignment")
+        if len(primary) > 1:
+            # Lists are incomplete for some unique counter-backed assists. Use
+            # them only to resolve ambiguity, and keep the assumption visible.
+            restricted = _solve(
+                component, budget, teams, window_ticks, max_search_states,
+                same_side=allow_same_side, restrict_assist_participants=True)
+            if len(restricted) == 1:
+                primary = restricted
+                participant_fallback = True
+        if not primary:
+            raise CreditError("No consistent credit answer")
         chosen = primary[0]
+        partial = len(primary) > 1
+        if partial:
+            # Two matching answers are not proof of unique kills. Search for an
+            # alternative killer on every death, including relaxed team/participant
+            # rules. Exhaustion still raises; no partial output is then published.
+            for index in range(len(component)):
+                if _solve(component, budget, teams, window_ticks, max_search_states,
+                          same_side=True, restrict_participants=False,
+                          different_from=chosen, different_index=index,
+                          different_killer_only=True):
+                    raise CreditError("Ambiguous kill credit assignment")
+            withheld = Counter()
+            for (stat, slot, _), count in budget.items():
+                if stat == "assists":
+                    withheld[slot] += count
+            unresolved_assists.update(withheld)
+            ambiguous_groups.append({
+                "first_tick": component[0]["tick"], "last_tick": component[-1]["tick"],
+                "deaths": [{"tick": e["tick"], "victim_slot": e["victim_slot"],
+                            "assist_players": list(e["assist_players"])} for e in component],
+                "unresolved_assists": dict(withheld),
+                "counter_increases": [{"stat": stat, "player_slot": slot, "tick": tick,
+                                       "count": count}
+                                      for (stat, slot, tick), count in budget.items()],
+            })
         for index, (event, (killer, credited_assists)) in enumerate(zip(component, chosen)):
             status = "exact"
             # Search for an alternative to THIS link, not just the first two
             # alternatives elsewhere in a simultaneous fight.
-            if _solve(component, budget, teams, window_ticks, max_search_states,
+            if partial:
+                review.append({"tick": event["tick"], "victim_slot": event["victim_slot"],
+                               "reason": "unresolved_assist_attribution"})
+            elif participant_fallback:
+                # The participant assumption affects the whole timing component.
+                status = "participant_assumed"
+            elif _solve(component, budget, teams, window_ticks, max_search_states,
                       same_side=True, different_from=chosen, different_index=index):
                 status = "same_side_possible"
             elif _solve(component, budget, teams, window_ticks, max_search_states,
@@ -545,7 +607,7 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
                    "killer_slot": event.get("killer_slot"), "killer_name": event.get("killer_name"),
                    "credited_killer_slot": killer, "link_status": status}
             output.append(row)
-            for slot in credited_assists:
+            for slot in ([] if partial else credited_assists):
                 assists.append({"tick": event["tick"], "victim_slot": event["victim_slot"],
                                 "assist_slot": slot, "same_side": teams[slot] == teams[event["victim_slot"]]})
 
@@ -556,13 +618,16 @@ def credit_kda(players, counters, deaths, final_scoreboard, *, window_ticks=4,
             totals[row["credited_killer_slot"]][0] += 1
     for row in assists:
         totals[row["assist_slot"]][2] += 1
+    for slot, count in unresolved_assists.items():
+        totals[slot][2] += count
     if {slot: tuple(value) for slot, value in totals.items()} != final:
         raise CreditError("Final scoreboard disagrees with credited totals")
-    return CreditResult(output, assists, review)
+    return CreditResult(output, assists, review, dict(unresolved_assists), ambiguous_groups)
 
 
 def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
-           same_side=False, different_from=None, different_index=None):
+           restrict_assist_participants=False, same_side=False,
+           different_from=None, different_index=None, different_killer_only=False):
     """Search counter-token allocations; distinguish links, not token permutations."""
     remaining = budget.copy()
     answers = set()
@@ -578,7 +643,9 @@ def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
         if index == len(events):
             answer = tuple(links)
             differs = (different_from is None or
-                       answer[different_index] != different_from[different_index])
+                       (answer[different_index][0] != different_from[different_index][0]
+                        if different_killer_only else
+                        answer[different_index] != different_from[different_index]))
             if not any(remaining.values()) and differs:
                 answers.add(answer)
             return
@@ -617,9 +684,18 @@ def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
         if enemy_owner:
             killers = [k for k in killers if k == owner]
         for killer in killers:
-            assist_slots = [s for s in teams if s != killer
-                            and available["assists", s]
-                            and (same_side or teams[s] != teams[victim])]
+            if (different_killer_only and index == different_index
+                    and killer == different_from[index][0]):
+                continue
+            participants = set(event["assist_players"])
+
+            assist_slots = [
+                s for s in teams
+                if s != killer
+                and available["assists", s]
+                and (same_side or teams[s] != teams[victim])
+                and (not restrict_assist_participants or s in participants)
+            ]
             for mask in product((False, True), repeat=len(assist_slots)):
                 selected = tuple(s for s, keep in zip(assist_slots, mask) if keep)
                 options = [death_options]
@@ -786,20 +862,31 @@ def build_clean(raw, match_id, *, window_ticks=4, max_search_states=100_000):
         assists = [{**row, "match_id": match_id} for row in credited.death_assists]
         result.tables["deaths"] = spark.createDataFrame(deaths, DEATH_SCHEMA).cache()
         result.tables["death_assists"] = spark.createDataFrame(assists, ASSIST_SCHEMA).cache()
+        complete = not credited.ambiguous_groups
+        assumed = any(row["link_status"] != "exact" for row in credited.deaths)
+        result.tables["matches"] = (result.tables["matches"]
+            .withColumn("assist_attribution_complete", F.lit(complete))
+            .withColumn("assist_attribution_assumed", F.lit(assumed)))
+        result.attribution = {
+            "complete": complete, "assumed": assumed,
+            "unresolved_assists": credited.unresolved_assists,
+            "ambiguous_groups": credited.ambiguous_groups,
+        }
         result.note("kda_credit_review", spark.createDataFrame(
             [{**r, "match_id": match_id} for r in credited.review], REVIEW_SCHEMA), blocking=False)
         result.note("kda_assumed_links", result.tables["deaths"].filter(F.col("link_status") != "exact"),
                     blocking=False)
         result.note("kda_same_side_assists", result.tables["death_assists"].filter("same_side"), blocking=False)
-        result.note("scoreboard_disagreements", scoreboard_disagreements(result.tables))
+        result.note("scoreboard_disagreements", scoreboard_disagreements(
+            result.tables, credited.unresolved_assists))
         return result
     except Exception:
         result.release()
         raise
 
 
-def scoreboard_disagreements(tables):
-    """Recheck Spark output using credited killer, not direct last hitter."""
+def scoreboard_disagreements(tables, unresolved_assists=None):
+    """Require exact kills/deaths and account for every withheld assist."""
     comparison = latest(tables["player_stats"], ["match_id", "player_slot"]).select(
         "match_id", "player_slot", "kills", "deaths", "assists")
     for table, slot, label in [("deaths", "credited_killer_slot", "event_kills"),
@@ -808,11 +895,17 @@ def scoreboard_disagreements(tables):
         counts = (tables[table].filter(F.col(slot).isNotNull()).groupBy("match_id", slot).count()
                   .select("match_id", F.col(slot).alias("player_slot"), F.col("count").alias(label)))
         comparison = comparison.join(counts, ["match_id", "player_slot"], "left").fillna({label: 0})
+    unresolved = F.lit(0)
+    for slot, count in (unresolved_assists or {}).items():
+        if slot not in range(10) or not isinstance(count, int) or count < 0:
+            raise CreditError("Invalid unresolved assist accounting")
+        unresolved = F.when(F.col("player_slot") == slot, F.lit(count)).otherwise(unresolved)
+    comparison = comparison.withColumn("unresolved_assists", unresolved)
     return comparison.filter(
         F.col("kills").isNull() | F.col("deaths").isNull() | F.col("assists").isNull()
         | (F.col("kills") != F.col("event_kills"))
         | (F.col("deaths") != F.col("event_deaths"))
-        | (F.col("assists") != F.col("event_assists")))
+        | (F.col("assists") != F.col("event_assists") + F.col("unresolved_assists")))
 
 
 def main(argv=None):
@@ -842,7 +935,7 @@ def main(argv=None):
         result = build_clean(raw, args.match_id, window_ticks=args.window_ticks,
                              max_search_states=args.max_search_states)
         report = {**validate(result, args.match_id), "credit_method": "per_tick_counters",
-                  "contract_version": "kda-credit-v1", "window_ticks": args.window_ticks}
+                  "contract_version": "kda-credit-v2", "window_ticks": args.window_ticks}
         complete = write_result(spark, result, report, output_base, args.preview)
         print(json.dumps({**report, "complete": complete, "preview": args.preview}, indent=2))
         return 0 if complete or args.preview else 2

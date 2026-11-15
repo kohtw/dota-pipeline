@@ -75,7 +75,7 @@ Follow these steps once if you started the stack before the Airflow database ser
 
 ### Pools, the Steam fetch and failed matches
 
-- **Pools.** `airflow-init` creates the pools `spark` (2 slots, parser and Spark clean containers), `steam_api` (1) and `opendota_api` (1). A task whose pool does not exist waits in "scheduled" forever, so on a stack started before the pools existed, run `docker compose up -d` once more.
+- **Pools.** `airflow-init` creates the pools `spark` (2 slots, parser and Spark clean containers), `steam_api` (1), `opendota_api` (1) and `warehouse_write` (1: the warehouse loads in `load_pending`, `steam_summary_elt` and `refresh_constants` and both `dbt_build` tasks, so a load never commits during a build). A task whose pool does not exist waits in "scheduled" forever, so on a stack started before the pools existed, run `docker compose up -d` once more.
 - **Steam fetch budget.** The Variable `steam_fetch_pages_per_run` sets how many pages of 100 matches `steam_fetch` saves each hour (default 10). Keep it at 50 or below: `steam_summary_elt` loads 50 pages per run, so more pages pile up unloaded.
 - **Download queue.** `ingest.download_queue` in the warehouse holds the replays to download. `download_pending` tries a queued replay again every hour while OpenDota does not have it yet, and gives up after 5 days (the task fails, which raises an alert).
 - **Alerts.** Failures and retries are logged to `/data/alerts/failures.jsonl`. To also get failures in Discord, set `ALERT_WEBHOOK_URL` in `.env` to a webhook URL. It is optional; blank turns it off.

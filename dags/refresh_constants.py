@@ -49,7 +49,8 @@ def refresh_constants():
         print(f"saved {prefix} ({len(raw['herodata'])} heroes)")
         return prefix
 
-    @task(outlets=[CONSTANTS_LOADED])
+    # dbt reads stg.constant_*, so this load shares warehouse_write with the other loads and dbt_build
+    @task(pool="warehouse_write", outlets=[CONSTANTS_LOADED])
     def load(prefix: str) -> dict:
         from dota import constants_load, storage, warehouse
 

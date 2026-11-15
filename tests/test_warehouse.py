@@ -76,7 +76,9 @@ def test_rows_from_parquet_empty_table_has_columns_but_no_rows():
 
 
 def test_load_match_deletes_every_table_inserts_present_ones_and_commits():
-    present = {"matches": parquet_bytes({"game_mode": [22], "winner_team": [2]}),
+    present = {"matches": parquet_bytes({"game_mode": [22], "winner_team": [2],
+               "end_time": [100], "game_start_tick": [30], "duration_s": [50.0],
+               "assist_attribution_complete": [True], "assist_attribution_assumed": [False]}),
                "players": parquet_bytes({"player_slot": [0, 1], "team": [2, 2]})}
     store = {warehouse.clean_prefix(t, MATCH) + "part-0.parquet": b for t, b in present.items()}
 
@@ -98,7 +100,9 @@ def test_load_match_deletes_every_table_inserts_present_ones_and_commits():
 
 def test_load_match_rolls_back_and_reraises_on_a_failed_insert():
     store = {warehouse.clean_prefix("matches", MATCH) + "part-0.parquet":
-             parquet_bytes({"game_mode": [22]})}
+             parquet_bytes({"game_mode": [22], "winner_team": [2], "end_time": [100],
+                            "game_start_tick": [30], "duration_s": [50.0],
+                            "assist_attribution_complete": [False], "assist_attribution_assumed": [True]})}
 
     def boom(cur, sql, rows):
         raise RuntimeError("insert failed")

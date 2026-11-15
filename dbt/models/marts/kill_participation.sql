@@ -37,11 +37,13 @@ team_assist_counts as (
 
 per_player as (
     select p.match_id, p.player_slot, p.team,
+           m.assist_attribution_complete, m.assist_attribution_assumed,
            coalesce(k.n, 0) as kills_from_events,
            coalesce(d.n, 0) as deaths_from_events,
            coalesce(a.n, 0) as assists_from_events,
            coalesce(t.n, 0) as assists_on_team_kills
     from {{ source('clean', 'players') }} p
+    join {{ source('clean', 'matches') }} m on m.match_id = p.match_id
     left join kill_counts k on k.match_id = p.match_id and k.player_slot = p.player_slot
     left join death_counts d on d.match_id = p.match_id and d.player_slot = p.player_slot
     left join assist_counts a on a.match_id = p.match_id and a.player_slot = p.player_slot
@@ -50,7 +52,8 @@ per_player as (
 
 with_team as (
     select *, sum(kills_from_events) over (partition by match_id, team) as team_kills,
-           kills_from_events + assists_on_team_kills as kill_involvements
+           case when assist_attribution_complete then
+               kills_from_events + assists_on_team_kills end as kill_involvements
     from per_player
 )
 
@@ -59,6 +62,7 @@ select
     match_id, player_slot, team,
     kills_from_events, deaths_from_events, assists_from_events, team_kills,
     assists_on_team_kills, kill_involvements,
+    assist_attribution_complete, assist_attribution_assumed,
     -- A team with no credited kills has no meaningful share.
     cast(kill_involvements as double precision) / nullif(team_kills, 0) as kill_participation
 from with_team

@@ -22,5 +22,6 @@ CLEAN_READY = Asset("s3://raw/clean")  # clean Parquet in Garage; produced by cl
 CLEAN_LOADED = Asset("postgres://warehouse:5432/warehouse/clean/matches")  # warehouse.clean.matches, standing for the clean schema; produced by the load DAG
 STEAM_RAW = Asset("s3://raw/steam_raw")  # raw Steam pages in Garage; produced by steam_fetch
 STEAM_LOADED = Asset("postgres://warehouse:5432/warehouse/stg/steam_matches")  # warehouse.stg.steam_matches, standing for the Steam stg tables; produced by steam_summary_elt
+REPLAYS_ARRIVED = Asset("s3://raw/replays")  # new replays in Garage; produced by download_pending and cold_restore, wakes parse_pending
 CONSTANTS_LOADED = Asset("postgres://warehouse:5432/warehouse/stg/constant_heroes")  # warehouse.stg.constant_heroes, standing for the stg.constant_* history tables; produced by refresh_constants
 DOWNLOADS_QUEUED = Asset("postgres://warehouse:5432/warehouse/ingest/download_queue")  # warehouse.ingest.download_queue; produced by dota_daily_download, wakes download_pending

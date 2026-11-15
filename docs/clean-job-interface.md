@@ -25,6 +25,11 @@ Tables: `matches`, `players`, `player_stats`, `positions`, `damage_events`, `dea
 - Columns, types, grain and keys are fixed by `docs/clean-contract.md` and `warehouse/init/02_clean_tables.sql`. Do not restate or change them.
 - Write with `partitionBy("match_id")`, so the part files carry NO `match_id` column (it lives in the path only).
 - Teams: 2 = Radiant, 3 = Dire.
+- `matches` includes explicit boolean `assist_attribution_complete` and
+  `assist_attribution_assumed` flags. Partial assists are allowed only with uniquely established
+  kill credit and exact published-plus-unresolved counter accounting in the review report.
+  See the clean contract for the partial-attribution policy; partial output can be completed
+  data, while preview output never is.
 - Only `death_assists` and `purchases` may be empty for a match (no parts written is accepted); every other table must have rows.
 - Write the completion marker LAST, only after all 9 tables are written:
 

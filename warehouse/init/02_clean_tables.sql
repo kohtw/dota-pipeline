@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS clean.matches (
     winner_team     INTEGER,
     end_time        BIGINT,
     game_start_tick INTEGER,
-    duration_s      DOUBLE PRECISION
+    duration_s      DOUBLE PRECISION,
+    assist_attribution_complete BOOLEAN NOT NULL,
+    assist_attribution_assumed BOOLEAN NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS clean.players (
@@ -114,3 +116,8 @@ CREATE TABLE IF NOT EXISTS clean.final_inventory (
 ALTER TABLE clean.deaths ADD COLUMN IF NOT EXISTS credited_killer_slot INTEGER;
 ALTER TABLE clean.deaths ADD COLUMN IF NOT EXISTS link_status TEXT;
 ALTER TABLE clean.death_assists ADD COLUMN IF NOT EXISTS same_side BOOLEAN;
+
+-- Existing matches remain unknown until re-cleaned and reloaded. Never infer
+-- completeness from an old completion marker or invent a default quality flag.
+ALTER TABLE clean.matches ADD COLUMN IF NOT EXISTS assist_attribution_complete BOOLEAN;
+ALTER TABLE clean.matches ADD COLUMN IF NOT EXISTS assist_attribution_assumed BOOLEAN;

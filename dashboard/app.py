@@ -149,6 +149,14 @@ def render_match_analysis(config: WarehouseConfig) -> None:
         st.error("Cannot display the scoreboard: a participant has an invalid team.")
         return
 
+    if any(p.get("assist_attribution_complete") is False for p in players):
+        st.info("Some assists could not be linked to a specific death. Recorded K/D/A is retained; "
+                "kill participation is unavailable for this match.")
+    elif any(p.get("assist_attribution_complete") is None for p in players):
+        st.info("Assist attribution has not been verified for this match. Kill participation is unavailable.")
+    if any(p.get("assist_attribution_assumed") is True for p in players):
+        st.caption("Some event links depend on combat-log participant assumptions.")
+
     # Route from the URL rather than a second selection in Session State, so a
     # refreshed or bookmarked link always identifies the same participant.
     if "player_slot" in st.query_params:

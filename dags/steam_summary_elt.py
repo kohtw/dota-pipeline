@@ -20,6 +20,9 @@ mounted into the Airflow services by docker-compose.yml (./warehouse/init at
 /opt/airflow/warehouse/init; dota.config.WAREHOUSE_INIT_DIR, override with the env var of that name).
 Without the mount the load task fails on every run.
 
+load_pages takes the one-slot pool warehouse_write (shared with load_pending and dbt_build): dbt
+models read stg.steam_*, so this load must not commit during a build.
+
   find_pages -> load_pages (DDL read, then per page: read -> gunzip -> parse -> load_steam -> marker)
              -> emit_loaded (outlet STEAM_LOADED; skipped when nothing loaded)
              -> report_failures (fails the run if any page failed; runs even when nothing loaded or when
@@ -57,7 +60,7 @@ def steam_summary_elt():
         print(f"{len(pending)} Steam pages unloaded; loading {min(len(pending), BATCH)} this run")
         return pending[:BATCH]
 
-    @task
+    @task(pool="warehouse_write")
     def load_pages(page_keys: list[str]) -> dict:
         from dota import steam_summary, storage, warehouse
 

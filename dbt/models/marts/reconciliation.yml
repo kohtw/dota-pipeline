@@ -22,8 +22,8 @@ models:
       - name: assists_replay
       - name: assists_steam
       - name: assists_events
-        description: "Full counter-credited assist ledger, including same-side assists; not the participation-only numerator."
+        description: "Published assist links including same-side assists; excludes unresolved links on partial matches."
       - name: scoreboard_matches_steam
         description: "Hero and all three of K/D/A equal between replay and Steam. False when either side is NULL."
       - name: events_match_scoreboard
-        description: "Replay K/D/A equal to credited kill/death/full-assist counts. False when either side is NULL."
+        description: "Exact event/scoreboard K/D/A equality for complete matches; NULL when assist attribution is partial. False for missing data otherwise."

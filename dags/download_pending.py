@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from airflow.sdk import AssetOrTimeSchedule, CronTriggerTimetable, dag, get_current_context, task
 
 from dota.alerts import ALERT_CALLBACKS
-from dota.assets import DOWNLOADS_QUEUED
+from dota.assets import DOWNLOADS_QUEUED, REPLAYS_ARRIVED
 
 LIMIT = 50  # queued matches per run; the rest wait for the next hour
 BATCH = 25  # matches per download task
@@ -47,7 +47,7 @@ def download_pending():
         return [due[i:i + BATCH] for i in range(0, len(due), BATCH)]
 
     # no task retries: the queue itself schedules the next try
-    @task(pool="opendota_api", retries=0, map_index_template=BATCH_LABEL)
+    @task(pool="opendota_api", retries=0, map_index_template=BATCH_LABEL, outlets=[REPLAYS_ARRIVED])
     def download_replays(match_ids: list[int]) -> str:
         from dota import ingest, opendota, storage, warehouse
         from dota.errors import PermanentError
