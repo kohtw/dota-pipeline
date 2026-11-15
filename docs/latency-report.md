@@ -98,11 +98,12 @@ maxima. Each session gets its own arrows in its colour.
 
 ## Loads and dbt never overlap
 
-`load_pending` (`apply_schema`, `load_one`), `steam_summary_elt` (`load_pages`) and both
-`dbt_build` tasks share the one-slot pool `warehouse_write`. dbt tests such as
-`kda_matches_events` compare live `clean.*` tables with marts built earlier in the same run. When
-a load committed mid-build, the test saw matches the marts did not have, and the build failed: 9
-of them in the 60-match burst, each costing about 4.5 minutes of mart freshness.
+`load_pending` (`apply_schema`, `load_one`), `steam_summary_elt` (`load_pages`),
+`refresh_constants` (`load`) and both `dbt_build` tasks share the one-slot pool
+`warehouse_write`. dbt tests such as `kda_matches_events` compare live `clean.*` tables with
+marts built earlier in the same run. When a load committed mid-build, the test saw matches the
+marts did not have, and the build failed: 9 of them in the 60-match burst, each costing about 4.5
+minutes of mart freshness.
 
 The tradeoff: a load that becomes ready during a build waits for it, and loads run one at a time
 (a load takes about 2 s), so `loaded` lag can rise by up to one build. In return every build sees

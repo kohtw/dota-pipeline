@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
     ("dbt_build.py", "apply_schema"),
     ("dbt_build.py", "build"),
     ("steam_summary_elt.py", "load_pages"),
+    ("refresh_constants.py", "load"),
 ])
 def test_warehouse_writers_share_one_pool(path, function):
     assert keyword(task_decorator(path, function), "pool") == "'warehouse_write'"
