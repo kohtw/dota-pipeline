@@ -617,9 +617,18 @@ def _solve(events, budget, teams, window, limit, *, restrict_participants=True,
         if enemy_owner:
             killers = [k for k in killers if k == owner]
         for killer in killers:
-            assist_slots = [s for s in teams if s != killer
-                            and available["assists", s]
-                            and (same_side or teams[s] != teams[victim])]
+            # assist_slots = [s for s in teams if s != killer
+            #                 and available["assists", s]
+            #                 and (same_side or teams[s] != teams[victim])]
+            participants = set(event["assist_players"])
+
+            assist_slots = [
+                s for s in teams
+                if s != killer
+                and available["assists", s]
+                and (same_side or teams[s] != teams[victim])
+                and (not restrict_participants or s in participants)
+            ]
             for mask in product((False, True), repeat=len(assist_slots)):
                 selected = tuple(s for s, keep in zip(assist_slots, mask) if keep)
                 options = [death_options]
