@@ -11,6 +11,9 @@ Needs the warehouse Postgres (the `warehouse` service in docker-compose; WAREHOU
 
   find_unloaded + apply_schema -> load_and_retain (one per match: load_one -> retain_dem) -> CLEAN_LOADED
 
+apply_schema and load_one share the one-slot pool warehouse_write with dbt_build and the Steam load,
+so a load waits for a running build and a build sees no half-loaded batch.
+
 load_one runs load_match, then writes the _loaded marker. retain_dem then applies the Airflow
 Variable `dem_retention` (keep | delete, default keep) to the match's raw replays/{id}.dem, but
 only if retention.eligible: the match is loaded and its clean output re-passes the clean contract.
@@ -25,7 +28,9 @@ from dota.alerts import ALERT_CALLBACKS
 from dota.assets import CLEAN_LOADED, CLEAN_READY
 
 BATCH = 20  # matches per run; the rest wait for the next trigger
-PARALLEL_LOADS = 4  # load is I/O-bound, so a few at once is fine
+# The one-slot warehouse_write pool runs loads one at a time and never during a dbt build, which
+# compares clean.* with marts built earlier in the same run. This cap only matters if it widens.
+PARALLEL_LOADS = 4
 # label mapped tasks with their match id (in the UI and in the alert log) instead of 0, 1, 2...
 MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can't template their mapped args)
 
@@ -40,7 +45,7 @@ MATCH_LABEL = "{{ match_label }}"  # set by the task itself (TaskFlow tasks can'
     tags=["orchestration"],
 )
 def load_pending():
-    @task
+    @task(pool="warehouse_write")
     def apply_schema() -> list[str]:
         # dbt also applies repeat-safe init SQL, but it runs AFTER loading. Apply
         # additions here first so older volumes can receive the new credit fields.
@@ -64,7 +69,8 @@ def load_pending():
 
     @task_group
     def load_and_retain(match_id: int):
-        @task(map_index_template=MATCH_LABEL, max_active_tis_per_dagrun=PARALLEL_LOADS, outlets=[CLEAN_LOADED])
+        @task(map_index_template=MATCH_LABEL, max_active_tis_per_dagrun=PARALLEL_LOADS, pool="warehouse_write",
+              outlets=[CLEAN_LOADED])
         def load_one(match_id: int) -> dict[str, int]:
             from dota import clean_contract, storage, warehouse
 
