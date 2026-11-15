@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from charts import build_team_advantage_chart
+from charts import SIGNIFICANT_SWING, build_team_advantage_chart, fight_result, key_teamfights
 from components import format_duration
 
 
@@ -10,9 +10,34 @@ def _apply_interval(key: str, start: int, end: int) -> None:
     st.session_state[key] = (start, end)
 
 
+def _render_key_teamfights(fights: list[dict] | None, deaths: list[dict], labels: dict[int, str]) -> None:
+    if fights is None:
+        return
+    key = key_teamfights(fights)
+    if not key:
+        st.caption(f"No teamfight moved the lead by {SIGNIFICANT_SWING:,}+ gold.")
+        return
+    st.caption(f"⚔ Key teamfights: 3+ deaths and a net-worth swing of {SIGNIFICANT_SWING:,}+ gold, "
+               "coloured by the winner. Hover a ⚔ for the fight's stats.")
+    rows = []
+    for fight in key:
+        fallen = [death for death in deaths if death["fight_number"] == fight["fight_number"]]
+        rows.append({
+            "Time": f"{format_duration(max(0, round(fight['start_s'])))}–{format_duration(max(0, round(fight['end_s'])))}",
+            "Result (kills R–D)": fight_result(fight),
+            "Net-worth swing": f"{fight['advantage_swing']:+,} → {'Radiant' if fight['advantage_swing'] > 0 else 'Dire'}",
+            "Damage R / D": f"{fight['radiant_hero_damage']:,} / {fight['dire_hero_damage']:,}",
+            "Heroes killed": ", ".join(labels.get(death["victim_slot"], f"Slot {death['victim_slot']}")
+                                       for death in fallen),
+        })
+    with st.expander(f"Key teamfights ({len(rows)})"):
+        st.dataframe(rows, hide_index=True, width="stretch")
+
+
 def render_team_advantage(
     records: list[dict] | None, match_id: int, *, progression_key: str | None = None,
-    progression_bounds: tuple[int, int] | None = None,
+    progression_bounds: tuple[int, int] | None = None, fights: list[dict] | None = None,
+    deaths: list[dict] | None = None, labels: dict[int, str] | None = None,
 ) -> None:
     if records is None:
         return
@@ -27,7 +52,9 @@ def render_team_advantage(
     complete = sum(row["net_worth_advantage"] is not None for row in records)
     st.caption(f"Complete observations: {complete:,} of {len(records):,}. "
                "Each team needs five fresh player snapshots, no older than five seconds. Missing coverage leaves gaps.")
-    st.plotly_chart(build_team_advantage_chart(records), key="team_advantage_chart")
+    st.plotly_chart(build_team_advantage_chart(records, fights=fights, deaths=deaths, labels=labels),
+                    key="team_advantage_chart")
+    _render_key_teamfights(fights, deaths or [], labels or {})
     if complete < len(records):
         with st.expander("Inspect incomplete coverage"):
             st.dataframe([

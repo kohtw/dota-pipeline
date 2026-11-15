@@ -5,8 +5,25 @@ from collections.abc import Callable
 
 import streamlit as st
 
+import hero_charts as hc
 from components import format_number, format_percentage
 from postgres_connection import DashboardDatabaseError
+
+# Pairs need this many matches to appear in the best/worst charts; small samples swing wildly.
+CHART_MINIMUM_MATCHES = 20
+CHART_PAIRS = 8
+
+
+def _render_pair_chart(rows: list[dict], label_key: str, key: str, noun: str) -> None:
+    minimum = CHART_MINIMUM_MATCHES
+    shown = hc.best_and_worst(rows, minimum_matches=minimum, count=CHART_PAIRS)
+    if len(shown) < 4:
+        minimum = 1
+        shown = hc.best_and_worst(rows, minimum_matches=minimum, count=CHART_PAIRS)
+    st.caption(f"Best and worst {noun} by win rate compared with the hero's overall win rate, among {noun} met in at "
+               f"least {minimum} match{'es' if minimum != 1 else ''}. Bars show percentage points; labels show "
+               "the win rate and number of matches.")
+    st.plotly_chart(hc.build_pair_chart(shown, label_key), key=key)
 
 
 def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> None:
@@ -26,6 +43,8 @@ def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> Non
            or abs(row["overall_win_rate"] - hero["win_rate"]) > 0.000001 for row in matchups):
         st.warning("The hero summaries are out of sync. Rebuild the hero marts before comparing opponent results.")
         return
+
+    _render_pair_chart(matchups, "opponent_label", f"hero_matchup_chart_{hero['hero_id']}", "opponents")
 
     labels = {row["opponent_hero_id"]: row["opponent_label"] for row in matchups}
     duplicates = Counter(labels.values())
@@ -73,3 +92,30 @@ def render_hero_matchups(hero: dict, loader: Callable[[int], list[dict]]) -> Non
         )):
             column.metric(label, value)
         st.caption(f"{row['wins']:,} wins and {row['losses']:,} losses, from {hero['hero_label']}'s perspective.")
+
+
+def render_hero_allies(hero: dict, loader: Callable[[int], list[dict]]) -> None:
+    st.subheader("Results with allied heroes")
+    st.caption("How often this hero's team won when each other hero was on the same team.")
+    try:
+        allies = loader(hero["hero_id"])
+    except DashboardDatabaseError:
+        st.warning("Ally results could not be loaded. Rebuild the hero marts.")
+        return
+    if not allies:
+        st.caption("No ally results available for this hero yet.")
+        return
+    if hero["win_rate"] is None or any(abs(row["overall_win_rate"] - hero["win_rate"]) > 0.000001 for row in allies):
+        st.warning("The hero summaries are out of sync. Rebuild the hero marts before comparing ally results.")
+        return
+    _render_pair_chart(allies, "ally_label", f"hero_ally_chart_{hero['hero_id']}", "allies")
+    with st.expander(f"All {len(allies)} allies"):
+        st.dataframe(
+            [{"Ally": row["ally_label"], "Matches": row["matches"], "Wins": row["wins"], "Losses": row["losses"],
+              "Win rate": 100 * row["win_rate"], "Difference (pp)": row["win_rate_difference_pp"]} for row in allies],
+            hide_index=True, width="stretch", key=f"hero_allies_table_{hero['hero_id']}",
+            column_config={
+                "Win rate": st.column_config.NumberColumn(format="%.1f%%"),
+                "Difference (pp)": st.column_config.NumberColumn(format="%+.1f pp"),
+            },
+        )

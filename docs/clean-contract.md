@@ -208,6 +208,40 @@ Built by [`dbt/`](../dbt/). The dashboard queries these. Each has dbt tests on i
 | `hero_performance_summary` | one hero in qualifying Steam matches | average combat, economy and contribution metrics with observation counts |
 | `hero_matchup_summary` | one ordered hero/opponent pair in qualifying Steam matches | whole-match results against each enemy hero and overall win-rate context |
 | `team_advantage_timeline` | one replay match at each ten-second observation time | Radiant versus Dire net worth, complete-team coverage and two-minute economic swings |
+| `match_deaths` | one scoreboard death | where it happened (corpse), credited killer, last-hitter kind, assisters, time dead, fight number |
+| `match_fights` | one fight (deaths under 15 s apart) | kind, deaths per side, winner, hero damage per side, net-worth swing |
+| `match_fight_players` | one player in one fight | K/D/A and enemy-hero damage dealt and taken in the fight window |
+| `player_damage_timeline` | one player in one game minute | damage dealt to heroes, buildings, Roshan and units; damage taken from heroes and units |
+| `player_purchases` | the items one player bought at one tick | build order, display names, recipe completions, consumable flag |
+| `player_lanes` | one player in one match | lane and lane role from laning-phase positions, stats at 10:00 |
+| `match_positions` | one hero every five seconds | position and alive flag (map replay, fight paths) |
+| `hero_item_timings` | one hero and item across parsed replays | how often and when the hero first bought the item |
+
+### Event marts
+
+Built from `clean.deaths`, `death_assists`, `positions`, `damage_events` and `purchases` for the
+dashboard's match timeline, map, fights, laning, items and damage views and the Replay insights page.
+Two staging views feed them:
+
+- `stg_hero_deaths`: a dead hero's entity stays at its corpse until it respawns and jumps to the
+  fountain. The corpse is the first position sample after the death tick, and the respawn is the first
+  later sample away from it (searched up to 240 seconds). On the first 62 replays every death found a
+  corpse and a respawn; average time dead rises from about 16 s early to about 80 s after 40 minutes.
+- `stg_hero_positions`: every position sample flagged `is_alive`, so lanes and the replay do
+  not count corpse time.
+
+Assumptions, also in each model's SQL:
+
+- **Fights** follow the OpenDota rule: a new fight starts after more than 15 seconds without a death.
+  Fights are not split by place, so two pick-offs on opposite lanes in the same seconds share a fight.
+  The fight window runs 10 s before the first death to 3 s after the last.
+- **Lanes** use fixed zones of world coordinates over 1:00-10:00 (own base left out); the most visited
+  zone wins at 40% or more, else `roaming`. On the 62 replays checked this gave a 2-1-2 split per team
+  in 61 matches.
+- **Damage** to buildings matches target names containing `tower`, `fort`, `rax`, `fillers` or
+  `healers`. A minute with no damage is a measured zero: the combat log covers the whole replay.
+- **Consumables** are a fixed list in `player_purchases`. Item costs are not in `dim_items`, so the
+  views mark recipe purchases (item completions) instead of guessing which items are "big".
 
 ### `match_inventory`
 

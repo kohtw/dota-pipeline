@@ -23,6 +23,8 @@ def test_scoreboard_maps_mart_rows(dashboard_database, warehouse_config, scorebo
     assert antimage["kill_participation"] == pytest.approx(2 / 3)
     assert antimage["assist_attribution_complete"] is True
     assert antimage["assist_attribution_assumed"] is False
+    assert (antimage["level"], antimage["gpm"], antimage["xpm"]) == (12, 450, 600)  # 6,000 XP over 10 minutes
+    assert (antimage["hero_damage"], antimage["tower_damage"], antimage["healing"]) == (9000, 700, 0)
     assert players[1]["main_inventory"] is None
     query, params = scoreboard_cursor.execute.call_args.args
     assert "WHERE s.match_id = %s" in query

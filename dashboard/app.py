@@ -4,6 +4,7 @@ from collections import Counter
 
 import streamlit as st
 
+import events_db
 from components import render_match_header, render_team_scoreboard, style_sidebar_navigation
 from config import DashboardConfigurationError, WarehouseConfig, load_warehouse_config
 from dashboard_db import (
@@ -13,6 +14,8 @@ from dashboard_db import (
     load_hero_statistics,
     load_hero_performance,
     load_hero_matchups,
+    load_hero_duration,
+    load_hero_allies,
     load_player_damage,
     load_player_inventory,
     load_player_snapshots,
@@ -21,18 +24,24 @@ from dashboard_db import (
 )
 from player import render_player_page
 from hero_stats import render_hero_statistics
+from insights import render_replay_insights
+from match_sections import (
+    MATCH_SECTIONS, PLAYER_SECTIONS, hero_labels, render_match_section, render_match_story, render_player_section,
+    section_switcher,
+)
 from team_advantage import render_team_advantage
 from match_search import render_match_examples, render_match_search
 
 
-VIEW_LABELS = {"heroes": "Hero statistics", "matches": "Match analysis"}
+VIEW_LABELS = {"heroes": "Hero statistics", "matches": "Match analysis", "insights": "Replay insights"}
 
 
 def switch_view() -> None:
     """Write the selected section to the URL and remove the other section's selection."""
     view = st.session_state["dashboard_view"]
     st.query_params["view"] = view
-    unrelated = ("match_id", "player_slot") if view == "heroes" else ("hero_id",)
+    match_keys = ("match_id", "player_slot", "tab", "player_tab")
+    unrelated = {"heroes": match_keys, "insights": (*match_keys, "hero_id")}.get(view, ("hero_id",))
     for key in unrelated:
         if key in st.query_params:
             del st.query_params[key]
@@ -42,7 +51,7 @@ def open_match(match_id: int) -> None:
     """Route to a match scoreboard without retaining a player or aggregate-hero selection."""
     st.query_params["view"] = "matches"
     st.query_params["match_id"] = str(match_id)
-    for key in ("player_slot", "hero_id"):
+    for key in ("player_slot", "hero_id", "player_tab"):
         if key in st.query_params:
             del st.query_params[key]
 
@@ -196,6 +205,14 @@ def render_match_analysis(config: WarehouseConfig) -> None:
             None,
         )
         other_slot = comparison_player["slot"] if comparison_player is not None else None
+
+        # Summary is the original player page; the other sections draw the event marts.
+        player_section = section_switcher(
+            PLAYER_SECTIONS, "player_tab", f"player_section_{match['match_id']}_{requested_slot}",
+        )
+        if player_section != "summary":
+            render_player_section(player_section, config, match, selected_player, players, comparison_player)
+            return
         try:
             snapshots_by_slot = load_player_snapshots(config, requested_match, requested_slot, other_slot)
         except DashboardDatabaseError as error:
@@ -225,23 +242,57 @@ def render_match_analysis(config: WarehouseConfig) -> None:
             roster=players,
             team_advantage=_load_team_advantage(config, requested_match),
             inventory_by_slot=inventory_by_slot,
+            fight_context=_load_fight_context(config, requested_match, players),
         )
         return
 
     # Missing optional statistics are formatted by the components rather than
     # rejected here, allowing incomplete records to remain visible and honest.
     render_match_header(match)
+    section = section_switcher(MATCH_SECTIONS, "tab", f"match_section_{match['match_id']}")
+    if section != "overview":
+        render_match_section(section, config, requested_match, players)
+        return
     st.caption("Select a hero to open their individual match analysis.")
     st.divider()
 
     # Both teams use the same renderer so their column layouts and formatting
     # stay consistent. Filtering creates new lists without changing source data.
+    _add_damage_taken(config, requested_match, players)
     radiant_players = [player for player in players if player["team"] == 2]
     dire_players = [player for player in players if player["team"] == 3]
     render_team_scoreboard("Radiant", radiant_players)
     render_team_scoreboard("Dire", dire_players)
+    team_advantage = _load_team_advantage(config, requested_match)
+    fight_context = _load_fight_context(config, requested_match, players)
+    render_match_story(config, requested_match, players, team_advantage,
+                       deaths=fight_context.get("deaths"), fights=fight_context.get("fights"))
     st.divider()
-    render_team_advantage(_load_team_advantage(config, requested_match), requested_match)
+    render_team_advantage(team_advantage, requested_match, **fight_context)
+
+
+def _add_damage_taken(config: WarehouseConfig, match_id: int, players: list[dict]) -> None:
+    """Damage each hero took from enemy heroes, from the optional damage mart; left missing (—) without it."""
+    try:
+        timeline = events_db.load_damage_timeline(config, match_id)
+    except DashboardDatabaseError:
+        return
+    taken = Counter()
+    for row in timeline:
+        taken[row["player_slot"]] += row["damage_from_heroes"]
+    for player in players:
+        if timeline:
+            player["damage_taken"] = taken[player["slot"]]
+
+
+def _load_fight_context(config: WarehouseConfig, match_id: int, players: list[dict]) -> dict:
+    """Deaths and fights for the key-teamfight markers; empty when the event marts are unavailable."""
+    try:
+        return {"deaths": events_db.load_match_deaths(config, match_id),
+                "fights": events_db.load_match_fights(config, match_id),
+                "labels": hero_labels(players)}
+    except DashboardDatabaseError:
+        return {}
 
 
 def _load_team_advantage(config: WarehouseConfig, match_id: int) -> list[dict] | None:
@@ -281,6 +332,9 @@ def main() -> None:
         st.error(str(error))
         return
 
+    if view == "insights":
+        render_replay_insights(config)
+        return
     if view == "heroes":
         try:
             heroes = load_hero_statistics(config)
@@ -291,6 +345,9 @@ def main() -> None:
         render_hero_statistics(
             heroes, performance_loader=lambda hero_id: load_hero_performance(config, hero_id),
             matchup_loader=lambda hero_id: load_hero_matchups(config, hero_id),
+            duration_loader=lambda hero_id: load_hero_duration(config, hero_id),
+            ally_loader=lambda hero_id: load_hero_allies(config, hero_id),
+            item_loader=lambda hero_id: events_db.load_hero_item_timings_by_id(config, hero_id),
         )
         return
     render_match_analysis(config)

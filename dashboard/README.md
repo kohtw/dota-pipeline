@@ -1,10 +1,30 @@
 # Dota 2 analytics dashboard
 
 The Streamlit app runs as a Docker Compose service and reads dbt marts from the analytics
-Postgres warehouse. Hero statistics shows aggregate picks, results, performance and enemy
-matchups. Match analysis shows team net-worth advantage, the scoreboard, final player stats,
-kill participation, net worth and XP over time, and hero damage by target and source. Items are
-shown as the final main-inventory snapshot.
+Postgres warehouse. Three sections:
+
+- **Hero statistics** shows a hero meta chart (pick rate against win rate, click a hero to open it)
+  and, per hero, its profile, win rate by game length, best and worst matchups and allies, and
+  item timings from the parsed replays.
+- **Match analysis** opens on the Overview: the scoreboard, a match story (kills, first blood,
+  teamfights won, biggest leads, bloodiest fight) and team net-worth advantage. A row of buttons
+  switches to the event views, built from the replay's event-level data:
+  - *Timeline*: net-worth lead with every kill on it, a per-hero kill/death/assist timeline with
+    fights shaded by winner, and a kill feed that separates scoreboard credit from the last hit.
+  - *Map*: an animated map replay of all ten heroes and where heroes died, drawn over the in-game minimap.
+  - *Fights*: every fight with deaths, damage and net-worth swing per side; pick one to see each
+    hero's path through it and who did what.
+  - *Laning*: who laned where, and each lane's net worth, last hits and levels at 10:00.
+  - *Items*: build orders for all ten heroes (recipe completions marked) and wards bought.
+  - *Damage*: hero damage per minute by team, what each hero hit, and hero-against-hero comparisons.
+
+  A player's page keeps its Summary (final stats, inventory, damage by target, net worth and XP)
+  and adds *Kills & lane*, *Map* and *Items & damage* views for that player and any comparison.
+- **Replay insights** looks across every parsed replay: how often an early lead holds, whether
+  winning a lane wins the game, when heroes die, what lands the killing blow, and item
+  timings by hero.
+
+The section, view and player all live in the URL, so a link reopens the same view.
 
 ## Run with Docker
 
@@ -59,6 +79,15 @@ real replay match. It reads `marts.match_scoreboard`, `marts.kill_participation`
 summaries have loaded. Each section works independently; an empty API mart does not prevent
 match analysis. Opening a page does not run ingestion or dbt.
 
+The match event views and Replay insights read the event marts: `match_deaths`, `match_fights`,
+`match_fight_players`, `player_damage_timeline`, `player_purchases`, `player_lanes`,
+`match_positions` and `hero_item_timings` (see
+[the data contract](../docs/clean-contract.md#event-marts)). Each view loads only the marts it draws;
+if they have not been built yet, that view shows a warning and the rest of the page still works.
+Maps are drawn over the patch 7.41 minimap (`assets/minimap_7.41.jpg`, Valve game art from
+Liquipedia). Its placement in world units, `MAP_IMAGE_EXTENT` in `event_charts.py`, was fitted to the
+parsed replays' fountain spawns and lane positions; refit it when a patch changes the map.
+
 Check the available analysed matches:
 
 ```powershell
@@ -86,7 +115,10 @@ separate neutral and TP slots, and six stash slots in a collapsed expander. Comp
 each player their own loadout. Labels come from `marts.match_inventory` and Valve's `dim_items`
 seed. Exact slot positions and duplicate items are preserved; unknown or unnamed items use readable
 fallback names. An absent slot says **Not recorded**, and a player without inventory rows shows
-an unavailable message. The scoreboard keeps its compact **Final main inventory** column.
+an unavailable message. The scoreboard shows the final main inventory beside each hero as six
+placeholder icons (item initials on a colour per item; hover for the name). Its other columns add
+level, GPM, XPM, hero damage, damage taken from heroes (from `player_damage_timeline`; — when that
+mart is missing), tower damage and healing.
 
 The **Progression time range** filters net worth and accumulated XP only. Final statistics, kill
 participation, inventory and full-match damage remain independent of that range.
@@ -190,6 +222,14 @@ losses, pick rate and win rate.
 - The sortable comparison table starts with the most-picked heroes. **Minimum picks** filters
   this table while keeping the selected hero and dataset-wide totals visible.
 - An empty mart displays **No hero statistics available yet**; test records are never substituted.
+- **Hero meta** plots every hero's pick rate against its win rate, bubble size by picks. Clicking a
+  bubble opens that hero (the selection goes into the URL like the selector's).
+- The selected hero shows win-rate and pick-rate ranks among heroes with at least 100 picks, then
+  tabs: **Profile** (performance profile), **Game length** (`marts.hero_duration_win_rate`: win
+  rate in matches under 30, 30–40, 40–50 and 50+ minutes), **Matchups** (best and worst eight
+  opponents by win-rate difference among those met in at least 20 matches, above the full table),
+  **Allies** (`marts.hero_ally_synergy`, the same view for teammates) and **Items** (replay item
+  timings from `marts.hero_item_timings`, a much smaller sample than the Steam win rates).
 
 Hero selections are saved in the URL, for example `?view=heroes&hero_id=1`. Opening that link in
 a new session restores the same hero if observations are present. Changing **Minimum picks**
