@@ -33,7 +33,7 @@ def assets(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 @pytest.mark.parametrize(
     ("name", "scheme"),
     [("RAW_PARSED", "s3"), ("CLEAN_READY", "s3"), ("CLEAN_LOADED", "postgres"), ("STEAM_LOADED", "postgres"),
-     ("STEAM_RAW", "s3")],
+     ("STEAM_RAW", "s3"), ("CONSTANTS_LOADED", "postgres")],
 )
 def test_asset_uri_scheme(assets: types.ModuleType, name: str, scheme: str) -> None:
     assert urlsplit(getattr(assets, name).uri).scheme == scheme
@@ -61,3 +61,9 @@ def test_steam_raw_names_the_bucket_and_prefix_the_pages_land_in(assets: types.M
     parsed = urlsplit(assets.STEAM_RAW.uri)
     assert parsed.hostname == "raw"
     assert parsed.path == "/steam_raw"
+
+
+def test_constants_loaded_names_database_schema_and_table(assets: types.ModuleType) -> None:
+    parsed = urlsplit(assets.CONSTANTS_LOADED.uri)
+    assert parsed.path.split("/")[1:] == ["warehouse", "stg", "constant_heroes"]
+    assert parsed.hostname == "warehouse"

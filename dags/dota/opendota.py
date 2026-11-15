@@ -1,4 +1,5 @@
-"""OpenDota: source of replay_url (needs the replay salt, which Valve's API doesn't give)."""
+"""OpenDota: source of replay_url (needs the replay salt, which Valve's API doesn't give) and of
+the game mode list."""
 
 import time
 
@@ -33,6 +34,18 @@ def _call(method, url: str) -> requests.Response:
         if r.status_code != 429 or attempt == RATE_LIMIT_TRIES - 1:
             return r
         time.sleep(_wait_s(r))
+
+
+def game_modes() -> dict:
+    """OpenDota's /constants/game_mode, the list of game mode ids (Valve's datafeed has none)."""
+    try:
+        r = _call(requests.get, f"{API}/constants/game_mode")
+    except requests.RequestException as e:
+        raise RuntimeError(redact(f"OpenDota game modes failed: {e}")) from None
+    if not r.ok:
+        problem = f"OpenDota game modes failed: HTTP {r.status_code}"
+        raise RuntimeError(problem) if is_transient_status(r.status_code) else PermanentError(problem)
+    return r.json()
 
 
 def replay_url(match_id: int) -> str:
