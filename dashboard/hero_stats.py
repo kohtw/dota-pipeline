@@ -5,9 +5,14 @@ from collections.abc import Callable
 
 import streamlit as st
 
+import event_charts as ec
+import hero_charts as hc
 from components import format_number, format_percentage
 from postgres_connection import DashboardDatabaseError
-from hero_matchups import render_hero_matchups
+from hero_matchups import render_hero_allies, render_hero_matchups
+
+# Heroes need this many picks to be ranked, so a rarely played hero cannot top the table by chance.
+RANK_MINIMUM_PICKS = 100
 
 
 def select_hero() -> None:
@@ -23,16 +28,80 @@ def select_hero() -> None:
             del st.query_params[key]
 
 
-def _render_hero_details(hero: dict) -> None:
+def _rank(heroes: list[dict], hero: dict, key: str) -> str | None:
+    """'#3 of 120' among heroes with RANK_MINIMUM_PICKS picks, or None when the hero has fewer."""
+    ranked = sorted((other for other in heroes if other["picks"] >= RANK_MINIMUM_PICKS and other[key] is not None),
+                    key=lambda other: -other[key])
+    ids = [other["hero_id"] for other in ranked]
+    return f"#{ids.index(hero['hero_id']) + 1} of {len(ids)}" if hero["hero_id"] in ids else None
+
+
+def _render_hero_details(hero: dict, heroes: list[dict] | None = None) -> None:
     """Present one observed hero's counts and rates without applying table filters."""
     st.subheader(hero["hero_label"])
     win_column, pick_column, picks_column, wins_column, losses_column = st.columns(5)
+    heroes = heroes or [hero]
+    win_rank, pick_rank = _rank(heroes, hero, "win_rate"), _rank(heroes, hero, "pick_rate")
     win_column.metric("Win rate", format_percentage(hero["win_rate"]), help="Wins divided by the hero's picks.")
     pick_column.metric("Pick rate", format_percentage(hero["pick_rate"]), help="Hero picks divided by qualifying matches.")
     picks_column.metric("Picks", format_number(hero["picks"]))
     wins_column.metric("Wins", format_number(hero["wins"]))
     losses_column.metric("Losses", format_number(hero["losses"]))
-    st.caption("— means unavailable.")
+    if win_rank and pick_rank:
+        st.caption(f"Win rate rank {win_rank} · pick rate rank {pick_rank}, among heroes with at least "
+                   f"{RANK_MINIMUM_PICKS} picks. — means unavailable.")
+    else:
+        st.caption(f"Not ranked: fewer than {RANK_MINIMUM_PICKS} picks. — means unavailable.")
+
+
+def _render_meta_chart(heroes: list[dict], selected_id: int | None) -> None:
+    """Every hero by pick and win rate; clicking a bubble opens that hero."""
+    st.subheader("Hero meta")
+    st.caption("Each bubble is a hero: further right is picked more, higher wins more; bigger means more picks. "
+               "The dotted line is a 50% win rate. Click a bubble to open that hero.")
+    event = st.plotly_chart(hc.build_meta_chart(heroes, selected_id), key="hero_meta_chart",
+                            on_select="rerun", selection_mode="points")
+    selection = getattr(event, "selection", None) or (event.get("selection") if isinstance(event, dict) else None)
+    points = (selection.get("points") if isinstance(selection, dict) else getattr(selection, "points", None)) or []
+    clicked = (points[0].get("customdata") or [None])[0] if points else None
+    # A selection persists across reruns; act only on a new click so the selector still works.
+    if clicked is not None and clicked != st.session_state.get("hero_meta_clicked"):
+        st.session_state["hero_meta_clicked"] = clicked
+        if clicked != selected_id:
+            st.query_params["hero_id"] = str(clicked)
+            st.rerun()
+
+
+def _render_duration(hero: dict, loader: Callable[[int], list[dict]]) -> None:
+    st.subheader("Win rate by game length")
+    st.caption("Win rate in matches that ended within each length range. Green bars beat the hero's overall "
+               "win rate (dashed line), red bars fall short; n is the number of matches.")
+    try:
+        rows = loader(hero["hero_id"])
+    except DashboardDatabaseError:
+        st.warning("Win rates by game length could not be loaded. Rebuild the hero marts.")
+        return
+    if not rows:
+        st.caption("No game-length results for this hero yet.")
+        return
+    st.plotly_chart(hc.build_duration_chart(rows, hero["win_rate"]), key=f"hero_duration_{hero['hero_id']}")
+
+
+def _render_items(hero: dict, loader: Callable[[int], list[dict]]) -> None:
+    st.subheader("Item timings")
+    try:
+        rows = loader(hero["hero_id"])
+    except DashboardDatabaseError:
+        st.warning("Item timings could not be loaded. They need the replay event marts.")
+        return
+    if not rows:
+        st.caption("No parsed replays with this hero yet.")
+        return
+    matches = rows[0]["hero_matches"]
+    st.caption(f"From {matches} parsed replay{'s' if matches != 1 else ''} with this hero, a much smaller sample "
+               "than the win rates above. Median time of the first purchase of each item bought in at least a "
+               "third of those matches; colour shows how often it was bought.")
+    st.plotly_chart(ec.build_item_timing_chart(rows, minimum_rate=1 / 3), key=f"hero_items_{hero['hero_id']}")
 
 
 def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]) -> None:
@@ -84,6 +153,9 @@ def _render_performance_profile(hero: dict, loader: Callable[[int], dict | None]
 def render_hero_statistics(
     heroes: list[dict], *, performance_loader: Callable[[int], dict | None] | None = None,
     matchup_loader: Callable[[int], list[dict]] | None = None,
+    duration_loader: Callable[[int], list[dict]] | None = None,
+    ally_loader: Callable[[int], list[dict]] | None = None,
+    item_loader: Callable[[int], list[dict]] | None = None,
 ) -> None:
     """Show dataset coverage, one hero's results and a sortable comparison table."""
     st.title("Hero statistics")
@@ -124,6 +196,8 @@ def render_hero_statistics(
                 st.warning("No recorded observations are available for the requested hero. Choose another hero.")
                 selected_id = None
 
+    _render_meta_chart(heroes, selected_id)
+
     # URL selection takes precedence over a previous widget value, including an invalid old link.
     st.session_state["hero_stats_selected_id"] = selected_id
     selected_id = st.selectbox(
@@ -134,11 +208,19 @@ def render_hero_statistics(
         if not requested:
             # Recording the default also makes a refreshed link independent of later label ordering.
             select_hero()
-        _render_hero_details(by_id[selected_id])
-        if performance_loader is not None:
-            _render_performance_profile(by_id[selected_id], performance_loader)
-        if matchup_loader is not None:
-            render_hero_matchups(by_id[selected_id], matchup_loader)
+        hero = by_id[selected_id]
+        _render_hero_details(hero, heroes)
+        sections = [(name, render) for name, loader, render in (
+            ("Profile", performance_loader, lambda: _render_performance_profile(hero, performance_loader)),
+            ("Game length", duration_loader, lambda: _render_duration(hero, duration_loader)),
+            ("Matchups", matchup_loader, lambda: render_hero_matchups(hero, matchup_loader)),
+            ("Allies", ally_loader, lambda: render_hero_allies(hero, ally_loader)),
+            ("Items", item_loader, lambda: _render_items(hero, item_loader)),
+        ) if loader is not None]
+        if sections:
+            for tab, (_, render) in zip(st.tabs([name for name, _ in sections]), sections):
+                with tab:
+                    render()
 
     st.subheader("Compare heroes")
     minimum_picks = st.number_input("Minimum picks", min_value=1, value=1, step=1, key="hero_stats_minimum_picks")

@@ -35,9 +35,14 @@ sources:
       - name: purchases
       - name: final_inventory
 
-  # Steam match-summary rows loaded by dags/steam_summary_elt.py (DDL: warehouse/init/04_steam_tables.sql).
+  # Steam match-summary rows loaded by dags/steam_summary_elt.py (DDL: warehouse/init/04_steam_tables.sql)
+  # and the reference data history appended by dags/refresh_constants.py (DDL: 06_constants_tables.sql).
   - name: stg
     schema: stg
     tables:
       - name: steam_matches
       - name: steam_players
+      - name: constant_heroes
+      - name: constant_items
+      - name: constant_patches
+      - name: constant_game_modes

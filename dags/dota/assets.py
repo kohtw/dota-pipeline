@@ -4,6 +4,8 @@ Each stage produces one Asset; the next stage is scheduled on it, so a finished
 upstream DAG run wakes its consumer instead of everyone polling on a timer:
 
   parse -> RAW_PARSED -> clean -> CLEAN_READY -> load -> CLEAN_LOADED -> dbt
+  steam_fetch -> STEAM_RAW -> steam_summary_elt -> STEAM_LOADED -> dbt
+  refresh_constants -> CONSTANTS_LOADED -> dbt
 
 URIs are stable identifiers, not live connections: Airflow treats two Assets as the
 same only when their URIs match, so producers and consumers import these objects from
@@ -18,5 +20,7 @@ from airflow.sdk import Asset
 RAW_PARSED = Asset("s3://raw/parsed")  # parsed Parquet in Garage; produced by parse_pending
 CLEAN_READY = Asset("s3://raw/clean")  # clean Parquet in Garage; produced by clean_pending
 CLEAN_LOADED = Asset("postgres://warehouse:5432/warehouse/clean/matches")  # warehouse.clean.matches, standing for the clean schema; produced by the load DAG
-STEAM_RAW = Asset("s3://raw/steam_raw")  # raw Steam pages in Garage; produced by steam_fetch and dota_daily_download
+STEAM_RAW = Asset("s3://raw/steam_raw")  # raw Steam pages in Garage; produced by steam_fetch
 STEAM_LOADED = Asset("postgres://warehouse:5432/warehouse/stg/steam_matches")  # warehouse.stg.steam_matches, standing for the Steam stg tables; produced by steam_summary_elt
+CONSTANTS_LOADED = Asset("postgres://warehouse:5432/warehouse/stg/constant_heroes")  # warehouse.stg.constant_heroes, standing for the stg.constant_* history tables; produced by refresh_constants
+DOWNLOADS_QUEUED = Asset("postgres://warehouse:5432/warehouse/ingest/download_queue")  # warehouse.ingest.download_queue; produced by dota_daily_download, wakes download_pending

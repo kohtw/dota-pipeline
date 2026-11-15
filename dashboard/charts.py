@@ -131,23 +131,80 @@ def build_damage_chart(series: list[tuple[str, dict[str, int]]]) -> go.Figure:
     return figure
 
 
-def build_team_advantage_chart(records: list[dict], *, change: bool = False) -> go.Figure:
-    """Show the fixed Radiant-minus-Dire convention without bridging missing observations."""
+RADIANT_COLOR, DIRE_COLOR, EVEN_COLOR = "#22c55e", "#ef4444", "#94a3b8"
+# A teamfight (3+ deaths) is highlighted when Radiant's lead moved at least this much across it.
+SIGNIFICANT_SWING = 2000
+
+
+def key_teamfights(fights: list[dict] | None) -> list[dict]:
+    """Teamfights whose net-worth swing reached SIGNIFICANT_SWING, in time order."""
+    return [fight for fight in fights or []
+            if fight["kind"] == "teamfight" and fight["advantage_swing"] is not None
+            and abs(fight["advantage_swing"]) >= SIGNIFICANT_SWING]
+
+
+def fight_result(fight: dict) -> str:
+    winner = {2: "Radiant won", 3: "Dire won"}.get(fight["winning_team"], "Even trade")
+    # Deaths are written as kills per side: Radiant kills are Dire deaths.
+    return f"{winner} {fight['dire_deaths']}–{fight['radiant_deaths']}"
+
+
+def _fight_hover(fight: dict, deaths: list[dict], labels: dict[int, str]) -> str:
+    fallen = [death for death in deaths if death["fight_number"] == fight["fight_number"]]
+    names = {2: [], 3: []}
+    for death in fallen:
+        names[death["victim_team"]].append(escape(labels.get(death["victim_slot"], f"Slot {death['victim_slot']}")))
+    swing = fight["advantage_swing"]
+    lines = [
+        f"<b>⚔ Teamfight {_clock_label(round(fight['start_s']))}–{_clock_label(round(fight['end_s']))}</b>",
+        f"{fight_result(fight)} (kills Radiant–Dire)",
+        f"Net worth swing: {swing:+,} gold toward {'Radiant' if swing > 0 else 'Dire'}",
+        f"Hero damage: Radiant {fight['radiant_hero_damage']:,} · Dire {fight['dire_hero_damage']:,}",
+        f"Heroes involved: {fight['participants']}",
+    ]
+    if names[2]:
+        lines.append("Radiant lost: " + ", ".join(names[2]))
+    if names[3]:
+        lines.append("Dire lost: " + ", ".join(names[3]))
+    return "<br>".join(lines)
+
+
+def build_team_advantage_chart(records: list[dict], *, change: bool = False, fights: list[dict] | None = None,
+                               deaths: list[dict] | None = None, labels: dict[int, str] | None = None) -> go.Figure:
+    """Show the fixed Radiant-minus-Dire convention without bridging missing observations.
+
+    The advantage is drawn as bars, green while Radiant leads and red while Dire leads; a missing
+    observation is a gap with no bar. With fights, key teamfights (see key_teamfights) are shaded
+    and marked ⚔ above the bars, with the fight's result and stats on hover.
+    The two-minute change stays a line.
+    """
     metric = "net_worth_advantage_change_120s" if change else "net_worth_advantage"
     times = [row["observation_time_s"] for row in records]
-    figure = go.Figure(go.Scatter(
-        x=times, y=[row[metric] for row in records], mode="lines+markers", connectgaps=False,
-        line={"color": "#a78bfa", "width": 2}, marker={"size": 4},
-        customdata=[[_clock_label(row["observation_time_s"]),
-                     "—" if row["radiant_net_worth"] is None else f"{row['radiant_net_worth']:,}",
-                     "—" if row["dire_net_worth"] is None else f"{row['dire_net_worth']:,}",
-                     f"{row['radiant_players_observed']}/5 Radiant; {row['dire_players_observed']}/5 Dire"]
-                    for row in records],
-        hovertemplate=("Game time: %{customdata[0]}<br>"
-                       + ("Change over preceding 2 minutes" if change else "Radiant − Dire")
-                       + ": %{y:+,.0f} gold<br>Radiant: %{customdata[1]}<br>Dire: %{customdata[2]}"
-                       + "<br>Coverage: %{customdata[3]}<extra></extra>"),
-    ))
+    values = [row[metric] for row in records]
+    customdata = [[_clock_label(row["observation_time_s"]),
+                   "—" if row["radiant_net_worth"] is None else f"{row['radiant_net_worth']:,}",
+                   "—" if row["dire_net_worth"] is None else f"{row['dire_net_worth']:,}",
+                   f"{row['radiant_players_observed']}/5 Radiant; {row['dire_players_observed']}/5 Dire"]
+                  for row in records]
+    hovertemplate = ("Game time: %{customdata[0]}<br>"
+                     + ("Change over preceding 2 minutes" if change else "Radiant − Dire")
+                     + ": %{y:+,.0f} gold<br>Radiant: %{customdata[1]}<br>Dire: %{customdata[2]}"
+                     + "<br>Coverage: %{customdata[3]}<extra></extra>")
+    if change:
+        figure = go.Figure(go.Scatter(
+            x=times, y=values, mode="lines+markers", connectgaps=False,
+            line={"color": "#a78bfa", "width": 2}, marker={"size": 4},
+            customdata=customdata, hovertemplate=hovertemplate,
+        ))
+    else:
+        colors = [EVEN_COLOR if value is None or value == 0 else RADIANT_COLOR if value > 0 else DIRE_COLOR
+                  for value in values]
+        figure = go.Figure(go.Bar(
+            x=times, y=values, marker={"color": colors, "line": {"width": 0}},
+            customdata=customdata, hovertemplate=hovertemplate, name="Radiant − Dire",
+        ))
+        figure.update_layout(bargap=0)
+        _add_key_teamfights(figure, values, key_teamfights(fights), deaths or [], labels or {})
     ticks = times[::max(1, (len(times) + 5) // 6)]
     if times and times[-1] not in ticks:
         ticks.append(times[-1])
@@ -159,3 +216,31 @@ def build_team_advantage_chart(records: list[dict], *, change: bool = False) -> 
         showlegend=False, height=320, margin={"l": 20, "r": 20, "t": 20, "b": 30},
     )
     return figure
+
+
+def _add_key_teamfights(figure: go.Figure, values: list, fights: list[dict], deaths: list[dict],
+                        labels: dict[int, str]) -> None:
+    """Shade each key teamfight's window and put a ⚔ marker above the bars, coloured by the winner."""
+    if not fights:
+        return
+    known = [value for value in values if value is not None]
+    low, high = min(known + [0]), max(known + [0])
+    span = (high - low) or 1000
+    marker_y = high + 0.18 * span
+    for fight in fights:
+        fill = {2: "rgba(34,197,94,0.16)", 3: "rgba(239,68,68,0.16)"}.get(fight["winning_team"], "rgba(148,163,184,0.16)")
+        figure.add_vrect(x0=fight["start_s"] - 10, x1=fight["end_s"] + 3, fillcolor=fill, line_width=0, layer="below")
+    figure.add_scatter(
+        x=[(fight["start_s"] + fight["end_s"]) / 2 for fight in fights], y=[marker_y] * len(fights),
+        mode="markers+text", text=["⚔"] * len(fights), textposition="middle center", textfont={"size": 13},
+        marker={"size": 24, "symbol": "circle", "line": {"width": 2, "color": "#0f172a"},
+                "color": [{2: RADIANT_COLOR, 3: DIRE_COLOR}.get(fight["winning_team"], EVEN_COLOR) for fight in fights]},
+        hovertext=[_fight_hover(fight, deaths, labels) for fight in fights], hoverinfo="text",
+        name="Key teamfights", cliponaxis=False,
+    )
+    for fight in fights:
+        swing = fight["advantage_swing"]
+        figure.add_annotation(x=(fight["start_s"] + fight["end_s"]) / 2, y=marker_y, yshift=20, showarrow=False,
+                              text=f"{swing / 1000:+.1f}k", font={"size": 11,
+                                                                   "color": RADIANT_COLOR if swing > 0 else DIRE_COLOR})
+    figure.update_yaxes(range=[low - 0.05 * span, high + 0.32 * span])

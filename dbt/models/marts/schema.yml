@@ -53,7 +53,7 @@ models:
         data_tests: [not_null, unique]
 
   - name: damage_by_pair
-    description: "Hero-to-hero damage by attacker, target and source, with the row's share of the attacker's team hero damage. Creep and tower damage is excluded."
+    description: "Hero-to-hero damage by attacker, target and source, with the row's share of the attacker's team enemy-hero damage. Creep and tower damage, friendly fire and self damage are excluded."
     columns:
       - name: pair_key
         data_tests: [not_null, unique]
@@ -189,6 +189,47 @@ models:
         description: "100 * (win_rate - overall_win_rate), in percentage points. Descriptive context, not a causal opponent effect."
         data_tests: [not_null]
 
+  - name: hero_duration_win_rate
+    description: "One hero and one match-length bucket in stg_steam_ranked: matches, wins and win rate when the match lasted under 30, 30–40, 40–50 or 50+ minutes. Buckets of one hero sum to its picks (hero_duration_matches_picks). Descriptive: game length is an outcome of the match, not a setting."
+    columns:
+      - name: hero_duration_key
+        description: "hero_id-bucket_order."
+        data_tests: [not_null, unique]
+      - name: hero_id
+        data_tests: [not_null]
+      - name: bucket_order
+        description: "1 under 30 min, 2 30–40, 3 40–50, 4 50+."
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [1, 2, 3, 4], quote: false}}
+      - name: duration_bucket
+        data_tests: [not_null]
+      - name: matches
+        data_tests: [not_null]
+      - name: win_rate
+        data_tests: [not_null]
+
+  - name: hero_ally_synergy
+    description: "One ordered hero/ally pair on the same team in stg_steam_ranked: whole-match wins, losses and win rate, with the hero's overall win rate and the difference in percentage points. The same-team counterpart of hero_matchup_summary; reverse pairs agree (hero_ally_reverse_pairs). No minimum sample; descriptive, not a causal synergy effect."
+    columns:
+      - name: hero_ally_key
+        description: "hero_id-ally_hero_id."
+        data_tests: [not_null, unique]
+      - name: hero_id
+        data_tests: [not_null]
+      - name: ally_hero_id
+        data_tests: [not_null]
+      - name: ally_name
+        description: "Nullable ally name from dim_heroes.localized_name."
+      - name: matches
+        data_tests: [not_null]
+      - name: wins
+        data_tests: [not_null]
+      - name: overall_win_rate
+        data_tests: [not_null]
+      - name: win_rate_difference_pp
+        data_tests: [not_null]
+
   - name: team_advantage_timeline
     description: "One replay match per aligned ten-second observation time. Complete five-player team net worth, Radiant minus Dire advantage and its exact 120-second change. Partial sums remain NULL; incomplete grid rows are retained. Measures sampled economic position, not win probability. See docs/team-advantage-contract.md."
     columns:
@@ -214,3 +255,140 @@ models:
         description: "Oldest selected snapshot age across both teams, including stale or invalid-net-worth observations; NULL if none were selected. A coverage diagnostic, not a freshness guarantee."
       - name: net_worth_advantage_change_120s
         description: "Current Radiant-minus-Dire advantage minus advantage at exactly 120 seconds earlier; NULL if either endpoint is unavailable."
+
+  - name: match_deaths
+    description: "One scoreboard death (clean.deaths) with the corpse position, respawn time, credited killer, assisters and fight. Fights are runs of deaths with no gap over 15 seconds. killer_kind classifies the direct last hitter; kill credit is credited_killer_slot."
+    columns:
+      - name: death_key
+        description: "match_id-tick-victim_slot."
+        data_tests: [not_null, unique]
+      - name: victim_team
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [2, 3], quote: false}}
+      - name: credited_killer_slot
+        description: "Player with scoreboard kill credit; NULL for a deny or a death nobody was credited for."
+      - name: killer_team
+        description: "Team of credited_killer_slot; NULL with it."
+      - name: killer_kind
+        description: "What landed the last hit: hero (including illusions), building, lane creep, neutral creep, roshan, fountain, summon (other units, e.g. wards and summoned creatures) or unknown."
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: ["hero", "building", "lane creep", "neutral creep", "roshan", "fountain", "summon", "unknown"]}}
+      - name: assist_count
+        description: "Credited assists on this death, including same-side credit."
+        data_tests: [not_null]
+      - name: assist_slots
+        description: "Comma-separated assister slots in slot order; NULL with no assists."
+      - name: x
+        description: "Corpse world x (stg_hero_deaths); NULL without a nearby position sample."
+      - name: respawn_s
+        description: "Game time the hero respawned or bought back; NULL when the replay ended first."
+      - name: dead_s
+        description: "Seconds spent dead; NULL with respawn_s."
+      - name: fight_number
+        description: "1-based fight within the match; a new fight starts when more than 15 seconds pass without a death."
+        data_tests: [not_null]
+      - name: is_first_blood
+        description: "True for the match's first scoreboard death."
+        data_tests: [not_null]
+
+  - name: match_fights
+    description: "One fight per match_deaths fight_number: time span, deaths per side, kind (teamfight 3+ deaths, skirmish 2, pick-off 1), the side that lost fewer heroes, the death centroid, hero damage per side in the fight window and the change in Radiant's net-worth advantage across it. The window runs 10 seconds before the first death to 3 seconds after the last."
+    columns:
+      - name: fight_key
+        description: "match_id-fight_number."
+        data_tests: [not_null, unique]
+      - name: kind
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: ["teamfight", "skirmish", "pick-off"]}}
+      - name: winning_team
+        description: "2 or 3 for the side that lost fewer heroes; NULL on an even trade."
+      - name: radiant_hero_damage
+        description: "Radiant damage to Dire heroes in the window, from match_fight_players."
+        data_tests: [not_null]
+      - name: dire_hero_damage
+        description: "Dire damage to Radiant heroes in the window, from match_fight_players."
+        data_tests: [not_null]
+      - name: advantage_swing
+        description: "Radiant advantage at the first ten-second grid time after the window minus the last one before it; NULL without full team coverage at both. Includes farming in that time, so it is context rather than the fight's own value."
+
+  - name: match_fight_players
+    description: "One player's part in one fight: kills, deaths, assists and enemy-hero damage dealt and taken in the fight window. Only players with any of these appear."
+    columns:
+      - name: fight_player_key
+        description: "match_id-fight_number-player_slot."
+        data_tests: [not_null, unique]
+      - name: damage_dealt
+        data_tests: [not_null]
+      - name: damage_taken
+        data_tests: [not_null]
+
+  - name: player_damage_timeline
+    description: "One roster player in one game minute (floor(game_time_s / 60)) the replay recorded: damage dealt to enemy heroes, buildings, Roshan and other units, and damage taken from enemy heroes and from units (creeps, towers, neutrals, summons). Zero means the combat log recorded none that minute."
+    columns:
+      - name: player_minute_key
+        description: "match_id-player_slot-minute."
+        data_tests: [not_null, unique]
+      - name: damage_to_heroes
+        description: "To enemy heroes only; self and ally damage are left out."
+        data_tests: [not_null]
+      - name: damage_from_units
+        description: "From anything that is not a hero: creeps, towers, neutrals, Roshan and summons."
+        data_tests: [not_null]
+
+  - name: player_purchases
+    description: "One clean.purchases row with its team, display name, buying order and flags: is_recipe (from dim_items, else the item_recipe_ prefix), is_consumable (wards, regeneration, scrolls, smoke, dust, tomes) and, for a recipe, the item it completes."
+    columns:
+      - name: purchase_key
+        description: "match_id-tick-player_slot-item_name."
+        data_tests: [not_null, unique]
+      - name: item_display_name
+        description: "dim_items localized name; unknown or unnamed items fall back to the internal name without item_ and underscores."
+        data_tests: [not_null]
+      - name: is_recipe
+        data_tests: [not_null]
+      - name: is_consumable
+        data_tests: [not_null]
+      - name: purchase_order
+        description: "1-based order of this row among the player's purchases in the match."
+        data_tests: [not_null]
+
+  - name: player_lanes
+    description: "One player in one match: the lane they played from 1:00 to 10:00 (positions while alive, own base left out), with lane_role from the team's side, and their stats at 10:00. Zones are fixed regions of world coordinates; see the model SQL. lane is 'roaming' when no zone holds 40% of the samples and NULL without samples."
+    columns:
+      - name: player_key
+        description: "match_id-player_slot."
+        data_tests: [not_null, unique]
+      - name: lane
+        data_tests:
+          - accepted_values: {arguments: {values: ["top", "mid", "bot", "jungle", "roaming"]}}
+      - name: lane_role
+        description: "safe (Radiant bot, Dire top), off (Radiant top, Dire bot), mid, jungle or roaming."
+        data_tests:
+          - accepted_values: {arguments: {values: ["safe", "mid", "off", "jungle", "roaming"]}}
+      - name: net_worth_10
+        description: "Net worth at the last snapshot between 9:50 and 10:00; NULL without one. The other *_10 columns use the same snapshot."
+
+  - name: match_positions
+    description: "Each hero's position every five seconds of game time (first sample in each five-second step), with is_alive. Feeds the map replay."
+    columns:
+      - name: position_key
+        description: "match_id-player_slot-time_s."
+        data_tests: [not_null, unique]
+      - name: is_alive
+        data_tests: [not_null]
+
+  - name: hero_item_timings
+    description: "One hero and one item across the parsed replays: matches the hero played, matches it bought the item, purchase_rate and the median and fastest first purchase time. Consumables are left out; a recipe counts as the item it completes. Describes this replay sample only."
+    columns:
+      - name: hero_item_key
+        description: "hero_name-item_name."
+        data_tests: [not_null, unique]
+      - name: hero_id
+        description: "Steam hero ID from dim_heroes, for the Hero statistics page; NULL for a hero missing from dim_heroes."
+      - name: matches_bought
+        data_tests: [not_null]
+      - name: median_first_purchase_s
+        data_tests: [not_null]

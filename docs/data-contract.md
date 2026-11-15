@@ -30,6 +30,7 @@ clean/{table}/match_id={match_id}/part-*.parquet          (Spark clean jobs, TBD
 clean/_rejected/match_id={match_id}/_REJECTED             marker: the clean job rejected this match
 steam_raw/seq_{start_seq}.json.gz                         one raw Steam match-history page
 steam_raw/_loaded/{page file name}                        marker: this page is loaded into the warehouse
+constants/fetched_at={YYYYMMDDTHHMMSSZ}/{resource}.json.gz  one raw reference data snapshot (see below)
 ```
 
 Writes are idempotent per match: re-parsing a match replaces only its `match_id=` partition in each table.
@@ -42,10 +43,24 @@ Writes are idempotent per match: re-parsing a match replaces only its `match_id=
 
 | Path | Written by | Content |
 |---|---|---|
-| `steam_raw/seq_{start_seq}.json.gz` | `steam_fetch` (hourly), `dota_daily_download` | One raw Steam match-history page: the API's `result` object, as gzipped JSON |
+| `steam_raw/seq_{start_seq}.json.gz` | `steam_fetch` (hourly) | One raw Steam match-history page: the API's `result` object, as gzipped JSON |
 | `steam_raw/_loaded/{page file name}` | `steam_summary_elt` | Empty marker, written after the page is loaded |
 | `parsed/_failed/match_id={id}/{run}` | `parse_pending` | Empty marker, one per sweep run in which the parser container crashed (non-zero exit other than 137). After 3, the sweep skips the match; deleting the prefix makes it eligible again |
 | `clean/_rejected/match_id={id}/_REJECTED` | `clean_pending` | Empty marker, written when the clean job rejects the match. Deleting it makes the match eligible again |
+
+### Reference data snapshots
+
+Written by `refresh_constants` (daily), one prefix per fetch. The time is the fetch time in UTC, ISO 8601
+basic format. Every file is the source's response as gzipped JSON, written as is. The load into
+`stg.constant_*` and the dims built from it are described in [constants-lane.md](constants-lane.md).
+
+| Path | Content |
+|---|---|
+| `constants/fetched_at={t}/herolist.json.gz` | Valve datafeed `herolist` |
+| `constants/fetched_at={t}/herodata.json.gz` | One object keyed by hero id (as a string): each hero's datafeed `herodata` response |
+| `constants/fetched_at={t}/itemlist.json.gz` | Valve datafeed `itemlist` |
+| `constants/fetched_at={t}/patchnoteslist.json.gz` | Valve datafeed `patchnoteslist` |
+| `constants/fetched_at={t}/game_mode.json.gz` | OpenDota `/constants/game_mode` |
 
 ## Tables
 

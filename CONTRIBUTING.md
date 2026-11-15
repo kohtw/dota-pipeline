@@ -6,13 +6,16 @@ How this repo is laid out, how to run it, and the few rules that keep it easy to
 
 ```
 dags/                      Airflow DAGs: orchestration only (schedule, retries, task wiring)
-  dota_daily_download.py   daily 00:00 SGT: ranked All Pick replays -> Garage
+  dota_daily_download.py   daily 01:00 SGT: pick yesterday's ranked All Pick matches -> download queue
+  download_pending.py      hourly: download the queued replays -> Garage
   replay_parse.py          parse one replay in Garage -> parsed Parquet tables in Garage
+  refresh_constants.py     daily (starts paused): heroes, items, patches, game modes -> Garage snapshot -> stg.constant_* history
   dota/                    the actual logic, plain Python, no Airflow
     config.py              constants only (cheap to import)
     steam.py               Valve Steam Web API
     opendota.py            OpenDota (replay download URL)
     storage.py             Garage / S3
+    ingest.py              the replay download queue (warehouse `ingest` schema)
 spark_jobs/                PySpark jobs
   replay_spec.py           which raw tables/columns to extract from a replay (edit this, not Java)
   parse_replays.py         replays -> one Parquet dataset per table
@@ -59,21 +62,22 @@ Output: `data/parsed/{table}/match_id={id}/*.parquet`.
 
 To add or change a raw column or table, edit `spark_jobs/replay_spec.py` and update `docs/data-contract.md` in the same PR.
 
-Don't trigger `dota_daily_download` by hand. Each run saves a bookmark that the next run starts from (see the file's docstring), so a manual run shifts the next day's window.
+`dota_daily_download` picks its matches from what `steam_fetch` loaded into `stg.steam_matches`, so keep `steam_fetch` unpaused or there is nothing to pick. To redo a past day, trigger it with config `{"day": "YYYY-MM-DD"}`. A rerun picks the same matches, and replays already in Garage are not downloaded again.
 
 ### Upgrading an existing stack
 
 Follow these steps once if you started the stack before the Airflow database service was renamed from `postgres` to `airflow-db`. Do them in this order.
 
 1. Add `AIRFLOW_FERNET_KEY` to `.env`. `.env.example` has the command that generates one. Until the key is set, every `docker compose` command stops with an error, including `ps` and `logs`.
-2. Run `docker compose up -d --build --remove-orphans`. The rename leaves the old `postgres` container running, and it uses the same `pg-data` volume as `airflow-db`. Two Postgres servers on one data directory corrupt it (run history, Variables, the download bookmark). `--remove-orphans` removes the old container only, not the volume.
-3. Set the Airflow Variables again (`dota_seq_bookmark`, `dem_retention`, `steam_pages_per_run`, `steam_fetch_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: a missing `dota_seq_bookmark` makes the next `dota_daily_download` run behave like a first run, so it saves a new bookmark and downloads nothing that day. `dem_retention` falls back to `keep`.
+2. Run `docker compose up -d --build --remove-orphans`. The rename leaves the old `postgres` container running, and it uses the same `pg-data` volume as `airflow-db`. Two Postgres servers on one data directory corrupt it (run history, Variables). `--remove-orphans` removes the old container only, not the volume.
+3. Set the Airflow Variables again (`dem_retention`, `steam_fetch_pages_per_run`, `matches_per_run`) in the Airflow UI under Admin > Variables. Variables saved before the shared key cannot be decrypted. Tasks then fall back to defaults without an alert: `dem_retention` falls back to `keep`, `matches_per_run` to 50.
 4. Rebuild your dev DuckDB file with `python warehouse/make_dev_db.py ~/.cache/dota/dev.duckdb` before the next local `dbt build` (rule 10). The project now has models that read `stg.steam_*`.
 
 ### Pools, the Steam fetch and failed matches
 
-- **Pools.** `airflow-init` creates the pools `spark` (2 slots, parser and Spark clean containers), `steam_api` (1) and `opendota_api` (2). A task whose pool does not exist waits in "scheduled" forever, so on a stack started before the pools existed, run `docker compose up -d` once more.
+- **Pools.** `airflow-init` creates the pools `spark` (2 slots, parser and Spark clean containers), `steam_api` (1) and `opendota_api` (1). A task whose pool does not exist waits in "scheduled" forever, so on a stack started before the pools existed, run `docker compose up -d` once more.
 - **Steam fetch budget.** The Variable `steam_fetch_pages_per_run` sets how many pages of 100 matches `steam_fetch` saves each hour (default 10). Keep it at 50 or below: `steam_summary_elt` loads 50 pages per run, so more pages pile up unloaded.
+- **Download queue.** `ingest.download_queue` in the warehouse holds the replays to download. `download_pending` tries a queued replay again every hour while OpenDota does not have it yet, and gives up after 5 days (the task fails, which raises an alert).
 - **Alerts.** Failures and retries are logged to `/data/alerts/failures.jsonl`. To also get failures in Discord, set `ALERT_WEBHOOK_URL` in `.env` to a webhook URL. It is optional; blank turns it off.
 - **Quarantined matches.** A match whose parser or clean container crashes in 3 sweeps is skipped from then on. A crash is a non-zero exit other than 137 (a kill for memory, which Airflow retries) and, for clean, 2 (a rejection, see `clean/_rejected/`). A failure where no container ran (image missing, docker-proxy down) is not counted. To retry a quarantined match after a fix, delete `parsed/_failed/match_id={id}/` or `clean/_failed/match_id={id}/` in Garage.
 
@@ -122,7 +126,7 @@ The Airflow scheduler re-reads every DAG file roughly every 30 seconds. At the t
 
 ### 5. Tasks must be safe to re-run
 
-A task that runs twice should give the same result. Check whether the output already exists, and write in a way that never leaves half a file. `download_replay` is the pattern to copy.
+A task that runs twice should give the same result. Check whether the output already exists, and write in a way that never leaves half a file. `ingest.try_download` is the pattern to copy.
 
 ### 6. Follow the data contract
 
@@ -166,7 +170,7 @@ Write comments for things the code can't say: why a value was chosen, or a quirk
   ```
   (`--project-dir` is where `dbt_project.yml` is; `--profiles-dir` is where `profiles.yml` is. The `DBT_*_PATH` variables keep dbt's output out of the repo. Install with `pip install duckdb dbt-core dbt-duckdb` in a venv outside the repo.)
 - Write portable SQL (plain joins and window functions) so the same models run on DuckDB and Postgres.
-- Reference data is dbt seeds in `dbt/seeds/`: `dim_heroes`, `dim_items`, `dim_patches` (from Valve's dota2.com datafeed) and `dim_game_modes` (from OpenDota, as the datafeed has none). After a game patch, run `python3 scripts/refresh_constants.py`, review the CSV diff, and commit it. Join heroes and items on their `npc_dota_hero_*` / `item_*` names, which is what replays use.
+- Reference data is the dims `dim_heroes`, `dim_items`, `dim_patches` and `dim_game_modes` in `dbt/models/dims/` (heroes, items and patches from Valve's dota2.com datafeed, game modes from OpenDota, as the datafeed has none). The `refresh_constants` DAG keeps their history in `stg.constant_*`; `dim_hero_versions` / `dim_item_versions` hold every version with its validity window. The seeds `dbt/seeds/baseline_*.csv` are the starting version, used where the DAG has not run. Refresh them with `python3 scripts/refresh_constants.py` only to add new keys, then review the CSV diff and commit it. Join heroes and items on their `npc_dota_hero_*` / `item_*` names, which is what replays use. See [docs/constants-lane.md](docs/constants-lane.md).
 
 ### 11. Tests
 
