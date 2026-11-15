@@ -115,3 +115,18 @@ def test_rate_limited_fetch_request_is_reported_as_429_not_as_requested(fake_htt
     with pytest.raises(RuntimeError, match="fetch request for 1 failed: HTTP 429") as err:
         opendota.replay_url(1)
     assert not isinstance(err.value, PermanentError)
+
+
+def test_game_modes_returns_the_constants(fake_http):
+    fake_http(Resp(200, {"22": {"id": 22, "name": "game_mode_all_draft"}}))
+    assert opendota.game_modes() == {"22": {"id": 22, "name": "game_mode_all_draft"}}
+
+
+def test_game_modes_5xx_is_retryable_and_4xx_permanent(fake_http):
+    fake_http(Resp(503))
+    with pytest.raises(RuntimeError, match="HTTP 503") as e:
+        opendota.game_modes()
+    assert not isinstance(e.value, PermanentError)
+    fake_http(Resp(404))
+    with pytest.raises(PermanentError, match="HTTP 404"):
+        opendota.game_modes()
