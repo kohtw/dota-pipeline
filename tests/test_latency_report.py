@@ -345,6 +345,34 @@ def test_chart_writes_png_and_html(tmp_path):
     assert only == [tmp_path / "burst.png"] and only[0].stat().st_size > 0
 
 
+def test_live_top_panel_is_in_hours_and_burst_in_seconds():
+    import matplotlib.pyplot as plt
+
+    sessions = {"live": live_session(), "b1": burst_session("b1", "burst_1x.json")}
+    style, groups = lr.chart_style(sessions)
+    assert groups == ["burst", "live"]
+    fig = lr.chart_figure(sessions)
+    burst_ax, live_ax = fig.axes[0], fig.axes[1]  # top row; the lag row follows
+    assert "h since --since" in live_ax.get_xlabel() and "h since --since" in live_ax.get_ylabel()
+    assert "s since T0" in burst_ax.get_xlabel() and "s since T0" in burst_ax.get_ylabel()
+    live_final = lr.final_points([r for r in sessions["live"] if r["lane"] == "replay"])
+    line = next(l for l in live_ax.get_lines() if l.get_label() == "live")
+    assert list(line.get_ydata()) == pytest.approx([y / 3600 for _, y in live_final])
+    burst_final = lr.final_points(sessions["b1"])
+    line = next(l for l in burst_ax.get_lines() if l.get_label() == "b1")
+    assert list(line.get_ydata()) == pytest.approx([y for _, y in burst_final])
+    # the lag panel below stays in seconds
+    lag_line = next(l for l in fig.axes[3].get_lines() if l.get_label() == "live")
+    assert max(lag_line.get_ydata()) > 86400
+    plt.close(fig)
+
+    html = lr.html_figure(sessions, style, groups)
+    live_trace = next(t for t in html.data if t.name == "live" and t.xaxis == "x2")
+    assert list(live_trace.y) == pytest.approx([y / 3600 for _, y in live_final])
+    assert html.layout.yaxis2.title.text == "processing time, h"
+    assert html.layout.yaxis.title.text == "processing time, s"
+
+
 def test_cli_chart_and_summary_from_csv(tmp_path, capsys):
     lr.write_csv(burst_session("b1", "burst_1x.json"), tmp_path / "b1.csv")
     lr.write_csv(live_session(), tmp_path / "live.csv")

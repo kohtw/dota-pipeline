@@ -79,6 +79,8 @@ Run extract after the pipeline has drained (dbt has run), or run it again later;
 - Top row: event time (x) against processing time (y). The dashed line is the ideal, where every
   match is processed the instant it happens. The thick line per session is the final stage; the
   faint lines are parsed and cleaned. The further above the diagonal, the larger the lag.
+  Burst axes are in seconds since T0; the live axes are in hours since `--since`, since live
+  replays arrive about a day after the match.
 - A curve that runs parallel to the diagonal means the pipeline keeps up: lag is constant. A
   curve that bends away means a backlog is building: lag grows with each match.
 - Flat steps are batches: several matches finish at the same processing time (one dbt run makes

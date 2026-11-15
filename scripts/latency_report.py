@@ -564,6 +564,14 @@ COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#62
 MARKERS = ("o", "s", "^", "D", "v", "P", "X")
 INK, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 EARLIER = ("parsed_at", "cleaned_at")
+# top-panel axis unit per group: (seconds per unit, unit). Live replays sit about a day after the
+# match ends, so seconds there run into six figures; hours read at a glance.
+TOP_UNITS = {"burst": (1, "s"), "live": (3600, "h")}
+
+
+def scaled(pts: list[tuple[float, float]], per: float) -> list[tuple[float, float]]:
+    """Points with both coordinates divided by `per` seconds (a top-panel axis unit)."""
+    return [(x / per, y / per) for x, y in pts]
 
 
 def final_points(rows: list[dict], with_ids: bool = False) -> list[tuple]:
@@ -590,18 +598,41 @@ def annotation(pts: list[tuple[float, float]], at: float | None = None) -> dict 
             "skew": None if front is None else round(p - front, 3)}
 
 
+def chart_style(sessions: dict[str, list[dict]]) -> tuple[dict, list[str]]:
+    style = {name: (COLORS[i % len(COLORS)], MARKERS[i % len(MARKERS)]) for i, name in enumerate(sessions)}
+    groups = [g for g in ("burst", "live") if any(r["kind"] == g for rows in sessions.values() for r in rows)]
+    return style, groups
+
+
 def chart(sessions: dict[str, list[dict]], out: Path, annotate_at: float | None = None,
           html: bool = True) -> list[Path]:
+    import matplotlib.pyplot as plt
+
+    fig = chart_figure(sessions, annotate_at)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    written = [out]
+    if html:
+        try:
+            written.append(chart_html(sessions, out.with_suffix(".html"), *chart_style(sessions)))
+        except ImportError:
+            pass
+    return written
+
+
+def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = None):
+    """The matplotlib figure: per group, event vs processing time on top, lag over time below."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    style = {name: (COLORS[i % len(COLORS)], MARKERS[i % len(MARKERS)]) for i, name in enumerate(sessions)}
-    groups = [g for g in ("burst", "live") if any(r["kind"] == g for rows in sessions.values() for r in rows)]
+    style, groups = chart_style(sessions)
     fig, axes = plt.subplots(2, len(groups), figsize=(7 * len(groups), 11), squeeze=False, facecolor=SURFACE)
     for col, group in enumerate(groups):
         ax, lag_ax = axes[0][col], axes[1][col]
+        per, unit = TOP_UNITS[group]
         lo, hi, annotated = math.inf, -math.inf, False
         for name, rows in sessions.items():
             rows = [r for r in rows if r["kind"] == group]
@@ -612,24 +643,27 @@ def chart(sessions: dict[str, list[dict]], out: Path, annotate_at: float | None 
                 lane_marker = marker if lane == "replay" else "x"
                 for stage in EARLIER:
                     if pts := sorted(points(lane_rows, stage)):
-                        ax.plot(*zip(*pts), color=color, alpha=0.25, lw=1, marker=lane_marker, ms=4)
+                        ax.plot(*zip(*scaled(pts, per)), color=color, alpha=0.25, lw=1, marker=lane_marker, ms=4)
                 pts = final_points(lane_rows)
                 if not pts:
                     continue
-                ax.plot(*zip(*pts), color=color, lw=2, marker=lane_marker, ms=6, label=label)
-                lo, hi = min(lo, *(min(p) for p in pts)), max(hi, *(max(p) for p in pts))
+                top = scaled(pts, per)
+                ax.plot(*zip(*top), color=color, lw=2, marker=lane_marker, ms=6, label=label)
+                lo, hi = min(lo, *(min(p) for p in top)), max(hi, *(max(p) for p in top))
                 by_y = sorted(pts, key=lambda q: q[1])
                 lag_ax.plot([y for _, y in by_y], [y - x for x, y in by_y], color=color, lw=2,
                             marker=lane_marker, ms=6, label=label)
                 if not annotated and lane == "replay" and (a := annotation(pts, annotate_at)):
                     annotated = True
                     gap = dict(arrowstyle="<->", color=INK, lw=1.2)
-                    ax.annotate("", xy=(a["lag_x"], a["lag_y"]), xytext=(a["lag_x"], a["lag_x"]), arrowprops=gap)
-                    ax.text(a["lag_x"], (a["lag_x"] + a["lag_y"]) / 2, f"  lag {fmt(a['lag'], 's')}",
+                    lag_x, lag_y, p = a["lag_x"] / per, a["lag_y"] / per, a["p"] / per
+                    ax.annotate("", xy=(lag_x, lag_y), xytext=(lag_x, lag_x), arrowprops=gap)
+                    ax.text(lag_x, (lag_x + lag_y) / 2, f"  lag {fmt(a['lag'], 's')}",
                             color=INK, fontsize=9, va="center")
                     if a["frontier"] is not None and a["skew"] > 0:
-                        ax.annotate("", xy=(a["frontier"], a["p"]), xytext=(a["p"], a["p"]), arrowprops=gap)
-                        ax.text((a["frontier"] + a["p"]) / 2, a["p"], f"skew {fmt(a['skew'], 's')}\n",
+                        front = a["frontier"] / per
+                        ax.annotate("", xy=(front, p), xytext=(p, p), arrowprops=gap)
+                        ax.text((front + p) / 2, p, f"skew {fmt(a['skew'], 's')}\n",
                                 color=INK, fontsize=9, ha="center", va="bottom")
         if lo < hi:
             pad = (hi - lo) * 0.05
@@ -637,9 +671,9 @@ def chart(sessions: dict[str, list[dict]], out: Path, annotate_at: float | None 
         title = "Burst sessions" if group == "burst" else "Live session"
         start = "T0 (restore start)" if group == "burst" else "--since"
         ax.set_title(f"{title}: event time vs processing time", color=INK, loc="left")
-        ax.set_xlabel(f"event time, s since {start}" + (" (scheduled replay of match end)" if group == "burst" else ""),
-                      color=MUTED)
-        ax.set_ylabel(f"processing time, s since {start}", color=MUTED)
+        ax.set_xlabel(f"event time, {unit} since {start}"
+                      + (" (scheduled replay of match end)" if group == "burst" else ""), color=MUTED)
+        ax.set_ylabel(f"processing time, {unit} since {start}", color=MUTED)
         lag_ax.set_title(f"{title}: lag over time (final stage)", color=INK, loc="left")
         lag_ax.set_xlabel(f"processing time, s since {start}", color=MUTED)
         lag_ax.set_ylabel("lag, s (processing - event)", color=MUTED)
@@ -656,19 +690,15 @@ def chart(sessions: dict[str, list[dict]], out: Path, annotate_at: float | None 
     fig.text(0.01, 0.005, "Final stage = mart visible (dbt) when known, else loaded. Faint: parsed, cleaned. "
              "Lag = vertical gap to the diagonal, skew = horizontal gap.", color=MUTED, fontsize=8)
     fig.tight_layout(rect=(0, 0.02, 1, 1))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150, facecolor=SURFACE)
-    plt.close(fig)
-    written = [out]
-    if html:
-        try:
-            written.append(chart_html(sessions, out.with_suffix(".html"), style, groups))
-        except ImportError:
-            pass
-    return written
+    return fig
 
 
 def chart_html(sessions, out: Path, style, groups) -> Path:
+    html_figure(sessions, style, groups).write_html(out, include_plotlyjs="cdn")
+    return out
+
+
+def html_figure(sessions, style, groups):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -677,6 +707,7 @@ def chart_html(sessions, out: Path, style, groups) -> Path:
     titles = [f"{g}: event vs processing" for g in groups] + [f"{g}: lag over time" for g in groups]
     fig = make_subplots(rows=2, cols=len(groups), subplot_titles=titles)
     for col, group in enumerate(groups, start=1):
+        per, unit = TOP_UNITS[group]
         lo, hi = math.inf, -math.inf
         for name, rows in sessions.items():
             color, marker = style[name]
@@ -688,26 +719,30 @@ def chart_html(sessions, out: Path, style, groups) -> Path:
                 pts, ids = [(x, y) for x, y, _ in triples], [m for _, _, m in triples]
                 label = name if lane == "replay" else f"{name} ({lane})"
                 sym = plotly_markers[marker] if lane == "replay" else "x"
-                fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="lines+markers",
+                top = scaled(pts, per)
+                num = ".0f" if per == 1 else ".2f"
+                fig.add_trace(go.Scatter(x=[p[0] for p in top], y=[p[1] for p in top], mode="lines+markers",
                                          name=label, legendgroup=label, text=ids,
                                          line=dict(color=color, width=2), marker=dict(symbol=sym),
-                                         hovertemplate="match %{text}<br>event %{x:.0f}s<br>processed %{y:.0f}s"),
+                                         hovertemplate=f"match %{{text}}<br>event %{{x:{num}}}{unit}"
+                                                       f"<br>processed %{{y:{num}}}{unit}"),
                               row=1, col=col)
                 by_y = sorted(pts, key=lambda q: q[1])
                 fig.add_trace(go.Scatter(x=[y for _, y in by_y], y=[y - x for x, y in by_y], mode="lines+markers",
                                          name=label, legendgroup=label, showlegend=False,
                                          line=dict(color=color, width=2), marker=dict(symbol=sym),
                                          hovertemplate="processed %{x:.0f}s<br>lag %{y:.0f}s"), row=2, col=col)
-                lo, hi = min(lo, *(min(p) for p in pts)), max(hi, *(max(p) for p in pts))
+                lo, hi = min(lo, *(min(p) for p in top)), max(hi, *(max(p) for p in top))
         if lo < hi:
             fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="ideal (y = x)",
                                      showlegend=col == 1, line=dict(color=MUTED, dash="dash", width=1)),
                           row=1, col=col)
+        fig.update_xaxes(title_text=f"event time, {unit}", row=1, col=col)
+        fig.update_yaxes(title_text=f"processing time, {unit}", row=1, col=col)
         if group == "live":
             fig.update_yaxes(type="log", row=2, col=col)
     fig.update_layout(height=900, template="plotly_white")
-    fig.write_html(out, include_plotlyjs="cdn")
-    return out
+    return fig
 
 
 # ---------- CLI ----------
