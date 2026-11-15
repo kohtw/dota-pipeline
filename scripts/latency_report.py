@@ -26,6 +26,7 @@ import math
 import os
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 UTC = dt.timezone.utc
@@ -569,6 +570,12 @@ EARLIER = ("parsed_at", "cleaned_at")
 # top-panel axis unit per group: (seconds per unit, unit). Live replays sit about a day after the
 # match ends, so seconds there run into six figures; hours read at a glance.
 TOP_UNITS = {"burst": (1, "s"), "live": (3600, "h")}
+# lag-panel unit per group. A burst's lag is minutes; in seconds the tick labels collapse to an
+# offset such as "+3.559e4". Live stays in seconds on a log scale (replays a day, Steam minutes).
+LAG_UNITS = {"burst": (60, "min"), "live": (1, "s")}
+FOOTER = ("Final stage = mart visible (dbt) when known, else loaded. Faint: parsed, cleaned. "
+          "Lag = vertical gap to the diagonal, skew = horizontal gap.")
+FOOTER_CHARS_PER_COL = 100  # characters of 8 pt footer text that fit across one 7-inch column
 
 
 def scaled(pts: list[tuple[float, float]], per: float) -> list[tuple[float, float]]:
@@ -629,12 +636,14 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import ScalarFormatter
 
     style, groups = chart_style(sessions)
     fig, axes = plt.subplots(2, len(groups), figsize=(7 * len(groups), 11), squeeze=False, facecolor=SURFACE)
     for col, group in enumerate(groups):
         ax, lag_ax = axes[0][col], axes[1][col]
         per, unit = TOP_UNITS[group]
+        lag_per, lag_unit = LAG_UNITS[group]
         lo, hi, annotated = math.inf, -math.inf, False
         for name, rows in sessions.items():
             rows = [r for r in rows if r["kind"] == group]
@@ -653,8 +662,8 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
                 ax.plot(*zip(*top), color=color, lw=2, marker=lane_marker, ms=6, label=label)
                 lo, hi = min(lo, *(min(p) for p in top)), max(hi, *(max(p) for p in top))
                 by_y = sorted(pts, key=lambda q: q[1])
-                lag_ax.plot([y for _, y in by_y], [y - x for x, y in by_y], color=color, lw=2,
-                            marker=lane_marker, ms=6, label=label)
+                lag_ax.plot([y / lag_per for _, y in by_y], [(y - x) / lag_per for x, y in by_y], color=color,
+                            lw=2, marker=lane_marker, ms=6, label=label)
                 if not annotated and lane == "replay" and (a := annotation(pts, annotate_at)):
                     annotated = True
                     gap = dict(arrowstyle="<->", color=INK, lw=1.2)
@@ -677,11 +686,14 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
                       + (" (scheduled replay of match end)" if group == "burst" else ""), color=MUTED)
         ax.set_ylabel(f"processing time, {unit} since {start}", color=MUTED)
         lag_ax.set_title(f"{title}: lag over time (final stage)", color=INK, loc="left")
-        lag_ax.set_xlabel(f"processing time, s since {start}", color=MUTED)
-        lag_ax.set_ylabel("lag, s (processing - event)", color=MUTED)
+        lag_ax.set_xlabel(f"processing time, {lag_unit} since {start}", color=MUTED)
+        lag_ax.set_ylabel(f"lag, {lag_unit} (processing - event)", color=MUTED)
         if group == "live":
             lag_ax.set_yscale("log")  # replays lag a day, Steam pages minutes
         for a in (ax, lag_ax):
+            for axis in (a.xaxis, a.yaxis):
+                if isinstance(axis.get_major_formatter(), ScalarFormatter):
+                    axis.get_major_formatter().set_useOffset(False)  # plain values, never "+3.559e4"
             a.set_facecolor(SURFACE)
             a.grid(color=GRID, lw=0.8)
             a.tick_params(colors=MUTED)
@@ -689,9 +701,10 @@ def chart_figure(sessions: dict[str, list[dict]], annotate_at: float | None = No
                 spine.set_color(GRID)
             if a.get_legend_handles_labels()[0]:
                 a.legend(frameon=False, fontsize=9)
-    fig.text(0.01, 0.005, "Final stage = mart visible (dbt) when known, else loaded. Faint: parsed, cleaned. "
-             "Lag = vertical gap to the diagonal, skew = horizontal gap.", color=MUTED, fontsize=8)
-    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    # one column is too narrow for the footer on one line, so wrap it and leave room for every line
+    footer = textwrap.wrap(FOOTER, FOOTER_CHARS_PER_COL * len(groups))
+    fig.text(0.01, 0.005, "\n".join(footer), color=MUTED, fontsize=8, va="bottom")
+    fig.tight_layout(rect=(0, 0.005 + 0.015 * len(footer), 1, 1))
     return fig
 
 

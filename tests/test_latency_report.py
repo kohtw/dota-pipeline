@@ -385,6 +385,40 @@ def test_live_top_panel_is_in_hours_and_burst_in_seconds():
     assert html.layout.yaxis.title.text == "processing time, s"
 
 
+def test_single_column_footer_stays_inside_the_figure():
+    import matplotlib.pyplot as plt
+
+    for sessions in ({"b1": burst_session("b1", "burst_1x.json")},
+                     {"live": live_session(), "b1": burst_session("b1", "burst_1x.json")}):
+        fig = lr.chart_figure(sessions)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        footer = fig.texts[0].get_window_extent(renderer)
+        assert fig.bbox.x0 <= footer.x0 and footer.x1 <= fig.bbox.x1 and fig.bbox.y0 <= footer.y0
+        lowest = min(ax.get_tightbbox(renderer).y0 for ax in fig.axes)
+        assert footer.y1 <= lowest  # the bottom panels' axis labels sit above the footer
+        plt.close(fig)
+
+
+def test_burst_lag_panel_is_in_plain_minutes():
+    import matplotlib.pyplot as plt
+
+    rows = burst_session("b1", "burst_1x.json")
+    # a run whose lags are all about ten hours apart by seconds gets an offset like "+3.559e4"
+    late = [{**r, "final_at": r["final_at"] + dt.timedelta(seconds=35590)} if r.get("final_at") else r
+            for r in rows]
+    fig = lr.chart_figure({"b1": late})
+    fig.canvas.draw()
+    lag_ax = fig.axes[1]
+    assert "min since T0" in lag_ax.get_xlabel() and "lag, min" in lag_ax.get_ylabel()
+    assert lag_ax.yaxis.get_offset_text().get_text() == ""
+    assert lag_ax.xaxis.get_offset_text().get_text() == ""
+    final = sorted(lr.final_points(late), key=lambda q: q[1])
+    line = next(l for l in lag_ax.get_lines() if l.get_label() == "b1")
+    assert list(line.get_ydata()) == pytest.approx([(y - x) / 60 for x, y in final])
+    plt.close(fig)
+
+
 def test_cli_chart_and_summary_from_csv(tmp_path, capsys):
     lr.write_csv(burst_session("b1", "burst_1x.json"), tmp_path / "b1.csv")
     lr.write_csv(live_session(), tmp_path / "live.csv")
